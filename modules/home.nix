@@ -68,9 +68,14 @@ let
   # ${font}-switch into a Nerd Font around each glyph and back to the
   # main font afterwards. Sized to match the surrounding text so glyph
   # baselines stay aligned with their adjacent characters.
-  nfBodyFont   = "FiraCode Nerd Font Mono:size=${toString cfg.bodySize}";
-  nfHeaderFont = "FiraCode Nerd Font Mono:size=${toString cfg.headerSize}";
-  headerFont   = "${cfg.fontFamily}:size=${toString cfg.headerSize}";
+  nfBodyFont     = "FiraCode Nerd Font Mono:size=${toString cfg.bodySize}";
+  nfHeaderFont   = "FiraCode Nerd Font Mono:size=${toString cfg.headerSize}";
+  headerFont     = "${cfg.fontFamily}:size=${toString cfg.headerSize}";
+  # Bold variants. ``:style=Bold`` is fontconfig's portable way to ask
+  # for the bold cut; the family must actually ship a Bold face (every
+  # Moralerspace variant does) or conky silently falls back to regular.
+  bodyFontBold   = "${cfg.fontFamily}:style=Bold:size=${toString cfg.bodySize}";
+  headerFontBold = "${cfg.fontFamily}:style=Bold:size=${toString cfg.headerSize}";
 
   # Nerd Font glyphs by name. We materialize each from its codepoint via
   # builtins.fromJSON because typing the raw PUA character into a Nix
@@ -97,9 +102,16 @@ let
   # ``${font}``) so subsequent text renders at the size we intend
   # rather than whatever happened to be in effect previously.
   icoBody   = g: "\${font ${nfBodyFont}}${g}\${font ${cfg.font}}";
-  icoHeader = g: "\${font ${nfHeaderFont}}${g}\${font ${headerFont}}";
-  # Wrap a block in the header font; restore body font on exit.
-  hdr = body: "\${font ${headerFont}}${body}\${font ${cfg.font}}";
+  # Header icon switches back to the *bold* header font so the icon's
+  # following text inherits the section's bold weight without an extra
+  # explicit switch at every callsite.
+  icoHeader = g: "\${font ${nfHeaderFont}}${g}\${font ${headerFontBold}}";
+  # Section headers — bold + larger. Switch back to plain body on exit.
+  hdr = body: "\${font ${headerFontBold}}${body}\${font ${cfg.font}}";
+  # Counter numbers — bold within their row, surrounded by regular icon
+  # + label so the digit reads as the data point.
+  boldExec = script: arg:
+    "\${font ${bodyFontBold}}\${execi 5 ${script} ${arg}}\${font ${cfg.font}}";
 
   mkBlock = name: pkgs.writeShellScript "wc-${name}" ''
     export STATE_FILE='${stateFile}'
@@ -186,9 +198,9 @@ let
     ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${execpi 5 ${ageScript}}
     ''${voffset 4}''${color7}─────────────────────────────''${color}
 
-    ''${color2}${icoBody glyph.bell}  ''${execi 5 ${counterScript} overdue}  ''${color6}Overdue''${color}
-    ''${color2}${icoBody glyph.clock}  ''${execi 5 ${counterScript} today}  ''${color6}Today''${color}
-    ''${color2}${icoBody glyph.calWeek}  ''${execi 5 ${counterScript} this_week}  ''${color6}This week''${color}
+    ''${color2}${icoBody glyph.bell}  ${boldExec counterScript "overdue"}  ''${color6}Overdue''${color}
+    ''${color2}${icoBody glyph.clock}  ${boldExec counterScript "today"}  ''${color6}Today''${color}
+    ''${color2}${icoBody glyph.calWeek}  ${boldExec counterScript "this_week"}  ''${color6}This week''${color}
 
     ''${voffset 6}''${color1}${hdr "${icoHeader glyph.today} Today"}''${color}
     ''${execi 5 ${todayScript}}
@@ -198,6 +210,7 @@ let
     ''${execpi 1 ${pomoScript}}
 
     ''${voffset 6}''${color1}${hdr "${icoHeader glyph.calWeek} Calendar"}''${color}
+    ''${font ${headerFontBold}}''${color1}Mo Tu We Th Fr Sa Su''${color}''${font ${cfg.font}}
     ${hdr "\${execpi 30 ${calScript}}"}
     ''${execpi 30 ${notesScript}}
     ''${execpi 5 ${errScript}}
@@ -312,13 +325,11 @@ in
     font = lib.mkOption {
       type = lib.types.str;
       default = "${cfg.fontFamily}:size=${toString cfg.bodySize}";
-      defaultText = "\${fontFamily}:size=\${bodySize}";
+      defaultText = "<fontFamily>:size=<bodySize>";
       description = ''
         Full conky font string for body text. Derived from
         ``fontFamily`` + ``bodySize`` by default; override here if
-        you need a totally different font (e.g. a Nerd Font that
-        also carries Japanese, so the ${"\\${font}"} switches in the
-        template can be removed).
+        you need a totally different body font.
       '';
     };
 
