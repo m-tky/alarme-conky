@@ -374,11 +374,36 @@ local function draw_calendar(cr, state)
   end
 end
 
--- ── widget: section label (SmallCaps text above each widget cluster) ────────
+-- ── widget: section label ──────────────────────────────────────────────────
+-- Same visual weight + icon as the text section headers below
+-- (rendered by hdr/icoHeader in conky.text). We use cairo's toy text
+-- API with two font selections — Nerd Font for the icon, the main
+-- family for the label — and emit them on the same baseline.
 
-local function draw_section_label(cr, x, y, label)
-  draw_small_caps(cr, x, y, label, 11, PALETTE.section, 2.4)
+local function draw_section_label(cr, x, y, icon_cp, label)
+  local size = 16  -- matches headerSize in home.nix
+  rgba(cr, PALETTE.section, 1.0)
+
+  -- Icon in Nerd Font.
+  cairo_select_font_face(cr, 'FiraCode Nerd Font Mono', 0, 1)
+  cairo_set_font_size(cr, size)
+  local ie = text_extents(cr, icon_cp)
+  local baseline_y = y - ie.y_bearing  -- top-of-glyph anchored at y
+  cairo_move_to(cr, x - ie.x_bearing, baseline_y)
+  cairo_show_text(cr, icon_cp)
+
+  -- Label in the main family, one space-width gap after the icon.
+  cairo_select_font_face(cr, FONT_FAM, 0, 1)
+  cairo_set_font_size(cr, size)
+  cairo_move_to(cr, x + ie.x_advance + 6, baseline_y)
+  cairo_show_text(cr, ' ' .. label)
 end
+
+-- Nerd Font Font-Awesome codepoints (must match the glyph table in
+-- home.nix → conky.text icoHeader entries so widget headers visually
+-- echo the text-section headers below them).
+local NF_FIRE     = '\u{f06d}'
+local NF_CALENDAR = '\u{f073}'
 
 -- ── main hook ───────────────────────────────────────────────────────────────
 
@@ -396,15 +421,15 @@ function conky_draw_panel()
   draw_kpi_row(cr, state)
 
   -- Habits — show the label only when at least one habit exists,
-  -- otherwise the panel carries a stray "HABITS" word above empty
+  -- otherwise the panel carries a stray "Habits" word above empty
   -- space. The calendar section always renders since the month grid
   -- is meaningful even when nothing is scheduled.
   if state.habits_today and #state.habits_today > 0 then
-    draw_section_label(cr, 12, Y_HABITS_LABEL, 'Habits')
+    draw_section_label(cr, 12, Y_HABITS_LABEL, NF_FIRE, 'Habits')
     draw_habits(cr, state)
   end
 
-  draw_section_label(cr, 12, Y_CAL_LABEL, 'Calendar')
+  draw_section_label(cr, 12, Y_CAL_LABEL, NF_CALENDAR, 'Calendar')
   draw_calendar(cr, state)
 
   cairo_destroy(cr)
