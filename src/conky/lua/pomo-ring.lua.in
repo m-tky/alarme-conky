@@ -1,0 +1,109 @@
+-- pomo-ring.lua — Cairo arc showing the elapsed ratio of an active
+-- Pomodoro session. Drawn in the top-right corner of the panel.
+--
+-- Wired via conky.config:
+--   lua_load = '<this file>'
+--   lua_draw_hook_post = 'conky_draw_pomo_ring'
+--
+-- Colour / dimension constants are filled in by home.nix at build
+-- time so the ring stays in sync with the conky palette without
+-- duplicating hex values. The state file path is also injected so
+-- this script doesn't have to know about XDG fallback.
+--
+-- We use lua_draw_hook_post (not _pre) so the ring sits on top of the
+-- text background — the cairo arc renders cleanly over the panel
+-- without being clipped by the text fill.
+
+require('cairo')
+
+local STATE      = '@STATE@'
+local PANEL_W    = @PANEL_W@
+local ACCENT_HEX = '@ACCENT_HEX@'
+local MUTED_HEX  = '@MUTED_HEX@'
+local FG_HEX     = '@FG_HEX@'
+local FONT_FAM   = '@FONT_FAMILY@'
+
+local function hex_rgb(h)
+  return tonumber(h:sub(1, 2), 16) / 255,
+         tonumber(h:sub(3, 4), 16) / 255,
+         tonumber(h:sub(5, 6), 16) / 255
+end
+
+local function read_pomo()
+  local f = io.open(STATE, 'r')
+  if not f then return nil end
+  local content = f:read('*a')
+  f:close()
+  -- Cheap targeted parse — full JSON would be over-engineering since
+  -- we only need three scalar fields and the fetcher writes the file
+  -- atomically (rename), so we never see a half-written grammar.
+  local ratio_s = content:match('"elapsed_ratio"%s*:%s*([%d%.]+)')
+  if not ratio_s then return nil end
+  local remaining = content:match('"remaining"%s*:%s*"([^"]+)"') or ''
+  local ratio = tonumber(ratio_s)
+  if not ratio or ratio < 0 then return nil end
+  if ratio > 1 then ratio = 1 end
+  return { ratio = ratio, remaining = remaining }
+end
+
+function conky_draw_pomo_ring()
+  if conky_window == nil then return end
+
+  local surface = conky_surface()
+  if surface == nil then return end
+
+  local pomo = read_pomo()
+  if pomo == nil then return end
+
+  local cr = cairo_create(surface)
+  -- Logical width is what cairo's coordinate system uses; pixel scaling
+  -- is applied by the surface's device_scale before paint.
+  local panel_w = (conky_window and conky_window.width) or PANEL_W
+  local cx = panel_w - 36
+  local cy = 32
+  local radius = 18
+  local thickness = 4
+
+  -- Background ring — muted, faint enough to suggest "this is the
+  -- track" without competing with the foreground arc.
+  do
+    local r, g, b = hex_rgb(MUTED_HEX)
+    cairo_set_source_rgba(cr, r, g, b, 0.30)
+    cairo_set_line_width(cr, thickness)
+    cairo_arc(cr, cx, cy, radius, 0, 2 * math.pi)
+    cairo_stroke(cr)
+  end
+
+  -- Progress arc — accent colour, rounded caps so the leading edge
+  -- doesn't look amputated. Sweeps clockwise from 12 o'clock.
+  do
+    local r, g, b = hex_rgb(ACCENT_HEX)
+    cairo_set_source_rgba(cr, r, g, b, 1.0)
+    cairo_set_line_width(cr, thickness)
+    cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND)
+    local start_a = -math.pi / 2
+    local end_a = start_a + 2 * math.pi * pomo.ratio
+    cairo_arc(cr, cx, cy, radius, start_a, end_a)
+    cairo_stroke(cr)
+  end
+
+  -- Remaining time, centred inside the ring. cairo's text origin sits
+  -- at the baseline so we offset cy by ~⅓ of the font size to vertically
+  -- centre the digits.
+  do
+    local r, g, b = hex_rgb(FG_HEX)
+    cairo_set_source_rgba(cr, r, g, b, 1.0)
+    cairo_select_font_face(cr, FONT_FAM,
+      CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD)
+    cairo_set_font_size(cr, 10)
+    local text = pomo.remaining
+    local extents = cairo_text_extents_t:create()
+    tolua.takeownership(extents)
+    cairo_text_extents(cr, text, extents)
+    cairo_move_to(cr, cx - extents.width / 2 - extents.x_bearing,
+                      cy - extents.y_bearing / 2)
+    cairo_show_text(cr, text)
+  end
+
+  cairo_destroy(cr)
+end

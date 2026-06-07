@@ -184,6 +184,11 @@ let
         use_xft = true,
         font = '${cfg.font}',
         override_utf8_locale = true,
+
+        -- Lua hooks for cairo-drawn widgets. Requires conky 1.23+ for
+        -- conky_surface() (we ship 1.24 via pkgs/conky.nix).
+        lua_load = '${pomoRingLua}',
+        lua_draw_hook_post = 'conky_draw_pomo_ring',
         default_color = '${colors.fg}',
         color1 = '${colors.section}',
         color2 = '${colors.counter}',
@@ -222,6 +227,19 @@ let
   appConfigToml = pkgs.writeText "wayland-conky-config.toml" ''
     api_base_url = "${cfg.apiBaseUrl}"
     poll_seconds = ${toString cfg.pollSeconds}
+  '';
+
+  # Pomodoro ring Lua script — substitute palette + paths into the
+  # template so the script stays declarative (no env reads at draw
+  # time, which fire 1×/sec inside conky's hot path).
+  pomoRingLua = pkgs.runCommand "pomo-ring.lua" { } ''
+    substitute ${../src/conky/lua/pomo-ring.lua.in} $out \
+      --replace-fail '@STATE@'        '${stateFile}' \
+      --replace-fail '@PANEL_W@'      '${toString cfg.minWidth}' \
+      --replace-fail '@ACCENT_HEX@'   '${colors.accent}' \
+      --replace-fail '@MUTED_HEX@'    '${colors.muted}' \
+      --replace-fail '@FG_HEX@'       '${colors.fg}' \
+      --replace-fail '@FONT_FAMILY@'  '${cfg.fontFamily}'
   '';
 
 in
