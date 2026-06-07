@@ -1,0 +1,389 @@
+-- panel-widgets.lua — cairo-drawn widgets for the alarme-conky panel.
+--
+-- Replaces the text-rendered counter rows, habit bullets, and calendar
+-- grid with shape-based widgets in the rice / unixporn aesthetic:
+-- ring gauges for KPI counters, ring gauges per habit, mini heatmap
+-- calendar. The banner, dividers, and the list sections (Today, Done
+-- today, Inbox, Notes, Errors) stay as conky text — the widgets are
+-- about visual density at a glance, the lists are about the actual
+-- data the user reads.
+--
+-- All constants are substituted by home.nix at build time so the
+-- script never reads env vars or config files at draw time (which
+-- would fire ~1/sec inside conky's hot path).
+
+require('cairo')
+
+-- ── injected by home.nix ────────────────────────────────────────────────────
+
+local STATE      = '@STATE@'
+local PANEL_W    = @PANEL_W@
+local FONT_FAM   = '@FONT_FAMILY@'
+
+local PALETTE = {
+  bg       = '@BG@',
+  fg       = '@FG@',
+  muted    = '@MUTED@',
+  divider  = '@DIVIDER@',
+  section  = '@SECTION@',
+  counter  = '@COUNTER@',
+  highlight= '@HIGHLIGHT@',
+  alert    = '@ALERT@',
+  ok       = '@OK@',
+  accent   = '@ACCENT@',
+}
+
+-- ── widget layout (y offsets in logical px, inside panel) ───────────────────
+-- These match the ${voffset} reservations in conky.text. Adjust both
+-- in lockstep if you change widget sizes.
+
+local Y_BANNER_DIVIDER = 36
+local Y_KPI_RINGS      = 56   -- top of ring row
+local KPI_RADIUS       = 26
+local KPI_THICKNESS    = 4
+local KPI_LABEL_GAP    = 12
+
+local Y_HABITS_LABEL   = Y_KPI_RINGS + KPI_RADIUS * 2 + 36
+local Y_HABITS_RINGS   = Y_HABITS_LABEL + 16
+local HABIT_RADIUS     = 11
+local HABIT_THICKNESS  = 3
+local HABIT_SPACING    = 30
+
+local Y_CAL_LABEL      = Y_HABITS_RINGS + HABIT_RADIUS * 2 + 28
+local Y_CAL_WEEKDAYS   = Y_CAL_LABEL + 16
+local Y_CAL_GRID       = Y_CAL_WEEKDAYS + 16
+local CAL_CELL_W       = (PANEL_W - 24) / 7
+local CAL_CELL_H       = 22
+
+-- ── helpers ─────────────────────────────────────────────────────────────────
+
+local function hex(h)
+  return tonumber(h:sub(1, 2), 16) / 255,
+         tonumber(h:sub(3, 4), 16) / 255,
+         tonumber(h:sub(5, 6), 16) / 255
+end
+
+local function rgba(cr, h, a)
+  local r, g, b = hex(h)
+  cairo_set_source_rgba(cr, r, g, b, a or 1.0)
+end
+
+local function text_extents(cr, s)
+  local ext = cairo_text_extents_t:create()
+  tolua.takeownership(ext)
+  cairo_text_extents(cr, s, ext)
+  return ext
+end
+
+local function draw_text_centered(cr, x, y, s, size, weight)
+  cairo_select_font_face(cr, FONT_FAM, 0, weight or 0)
+  cairo_set_font_size(cr, size)
+  local e = text_extents(cr, s)
+  cairo_move_to(cr, x - e.width / 2 - e.x_bearing, y - e.y_bearing / 2 - e.height / 2)
+  cairo_show_text(cr, s)
+end
+
+local function draw_text_left(cr, x, y, s, size, weight)
+  cairo_select_font_face(cr, FONT_FAM, 0, weight or 0)
+  cairo_set_font_size(cr, size)
+  local e = text_extents(cr, s)
+  cairo_move_to(cr, x - e.x_bearing, y - e.y_bearing)
+  cairo_show_text(cr, s)
+end
+
+-- letter-spaced uppercase rendering for SmallCaps-ish section headers
+local function draw_small_caps(cr, x, y, s, size, color_hex, spacing)
+  spacing = spacing or 2
+  cairo_select_font_face(cr, FONT_FAM, 0, 1)
+  cairo_set_font_size(cr, size)
+  rgba(cr, color_hex, 1.0)
+  local cur_x = x
+  for ch in s:upper():gmatch('.') do
+    local e = text_extents(cr, ch)
+    cairo_move_to(cr, cur_x - e.x_bearing, y - e.y_bearing)
+    cairo_show_text(cr, ch)
+    cur_x = cur_x + e.x_advance + spacing
+  end
+end
+
+-- ── state loading ───────────────────────────────────────────────────────────
+
+local function load_state()
+  local f = io.open(STATE, 'r')
+  if not f then return {} end
+  local s = f:read('*a')
+  f:close()
+  -- We pay the cost of full JSON via a tiny recursive parser only
+  -- because the calendar struct is nested. Cheap enough at 1Hz.
+  local ok, decoded = pcall(_json_decode, s)
+  if not ok then return {} end
+  return (decoded or {}).data or {}
+end
+
+-- Minimal JSON decoder — handles the shapes our fetcher emits
+-- (strings, numbers, booleans, null, arrays, objects). Less code than
+-- pulling in dkjson + lua-cjson via a build dep.
+_json_decode = function(s)
+  local pos = 1
+  local function skip_ws()
+    while pos <= #s and s:sub(pos, pos):match('[%s\n\r\t]') do
+      pos = pos + 1
+    end
+  end
+  local function parse_value()
+    skip_ws()
+    local c = s:sub(pos, pos)
+    if c == '"' then
+      local start = pos + 1
+      pos = pos + 1
+      while pos <= #s do
+        local ch = s:sub(pos, pos)
+        if ch == '\\' then pos = pos + 2
+        elseif ch == '"' then
+          local raw = s:sub(start, pos - 1)
+          pos = pos + 1
+          raw = raw:gsub('\\"', '"'):gsub('\\\\', '\\'):gsub('\\n', '\n'):gsub('\\t', '\t')
+          return raw
+        else pos = pos + 1 end
+      end
+    elseif c == '{' then
+      local t = {}; pos = pos + 1; skip_ws()
+      if s:sub(pos, pos) == '}' then pos = pos + 1; return t end
+      while true do
+        skip_ws()
+        local k = parse_value()
+        skip_ws(); pos = pos + 1  -- ':'
+        local v = parse_value(); t[k] = v
+        skip_ws()
+        local nxt = s:sub(pos, pos)
+        pos = pos + 1
+        if nxt == '}' then return t end
+      end
+    elseif c == '[' then
+      local t = {}; pos = pos + 1; skip_ws()
+      if s:sub(pos, pos) == ']' then pos = pos + 1; return t end
+      while true do
+        local v = parse_value(); table.insert(t, v); skip_ws()
+        local nxt = s:sub(pos, pos)
+        pos = pos + 1
+        if nxt == ']' then return t end
+      end
+    elseif c == 't' then pos = pos + 4; return true
+    elseif c == 'f' then pos = pos + 5; return false
+    elseif c == 'n' then pos = pos + 4; return nil
+    else
+      local start = pos
+      while pos <= #s and s:sub(pos, pos):match('[%d%.eE%+%-]') do
+        pos = pos + 1
+      end
+      return tonumber(s:sub(start, pos - 1))
+    end
+  end
+  return parse_value()
+end
+
+-- ── widget: gradient divider ────────────────────────────────────────────────
+
+local function draw_divider(cr, y)
+  local x0, x1 = 12, PANEL_W - 12
+  local pat = cairo_pattern_create_linear(x0, y, x1, y)
+  local r, g, b = hex(PALETTE.divider)
+  cairo_pattern_add_color_stop_rgba(pat, 0,    r, g, b, 0)
+  cairo_pattern_add_color_stop_rgba(pat, 0.5,  r, g, b, 0.7)
+  cairo_pattern_add_color_stop_rgba(pat, 1,    r, g, b, 0)
+  cairo_set_source(cr, pat)
+  cairo_set_line_width(cr, 1)
+  cairo_move_to(cr, x0, y)
+  cairo_line_to(cr, x1, y)
+  cairo_stroke(cr)
+  cairo_pattern_destroy(pat)
+end
+
+-- ── widget: KPI ring (counter as ring gauge) ────────────────────────────────
+-- ``count`` fills the ring against ``soft_cap`` — at the cap the ring
+-- is fully accent-coloured, beyond it the ring overdraws in alert
+-- (signalling overload). The number sits dead-centre inside.
+
+local function draw_kpi_ring(cr, cx, cy, count, label, accent_hex, soft_cap)
+  soft_cap = soft_cap or 10
+  local ratio = math.min(count / soft_cap, 1.0)
+  local over = count > soft_cap
+
+  -- Track ring
+  rgba(cr, PALETTE.muted, 0.30)
+  cairo_set_line_width(cr, KPI_THICKNESS)
+  cairo_arc(cr, cx, cy, KPI_RADIUS, 0, 2 * math.pi)
+  cairo_stroke(cr)
+
+  -- Filled arc
+  if count > 0 then
+    rgba(cr, over and PALETTE.alert or accent_hex, 1.0)
+    cairo_set_line_width(cr, KPI_THICKNESS)
+    cairo_set_line_cap(cr, 1)
+    local start = -math.pi / 2
+    cairo_arc(cr, cx, cy, KPI_RADIUS, start, start + 2 * math.pi * ratio)
+    cairo_stroke(cr)
+  end
+
+  -- Number in centre
+  rgba(cr, PALETTE.fg, 1.0)
+  draw_text_centered(cr, cx, cy, tostring(count), 22, 1)
+
+  -- Label below, SmallCaps
+  cairo_select_font_face(cr, FONT_FAM, 0, 1)
+  cairo_set_font_size(cr, 8)
+  local label_w = 0
+  for ch in label:upper():gmatch('.') do
+    local e = text_extents(cr, ch)
+    label_w = label_w + e.x_advance + 1.6
+  end
+  rgba(cr, PALETTE.muted, 1.0)
+  draw_small_caps(cr, cx - label_w / 2, cy + KPI_RADIUS + KPI_LABEL_GAP, label, 8, PALETTE.muted, 1.6)
+end
+
+local function draw_kpi_row(cr, state)
+  local counters = state.counters or {}
+  local centers = { PANEL_W / 6, PANEL_W / 2, 5 * PANEL_W / 6 }
+  local cy = Y_KPI_RINGS + KPI_RADIUS
+  draw_kpi_ring(cr, centers[1], cy, counters.overdue or 0, 'overdue', PALETTE.alert, 5)
+  draw_kpi_ring(cr, centers[2], cy, counters.today or 0, 'today', PALETTE.highlight, 8)
+  draw_kpi_ring(cr, centers[3], cy, counters.this_week or 0, 'week', PALETTE.section, 15)
+end
+
+-- ── widget: habit rings ─────────────────────────────────────────────────────
+-- One small ring per habit, filled proportionally to count/target.
+-- Section label "HABITS" above the row (drawn by draw_section_label).
+
+local function draw_habit_ring(cr, cx, cy, habit)
+  local count = tonumber(habit.count) or 0
+  local target = tonumber(habit.target_count) or 1
+  local ratio = math.min(count / target, 1.0)
+
+  -- Track
+  rgba(cr, PALETTE.muted, 0.25)
+  cairo_set_line_width(cr, HABIT_THICKNESS)
+  cairo_arc(cr, cx, cy, HABIT_RADIUS, 0, 2 * math.pi)
+  cairo_stroke(cr)
+
+  -- Filled portion (ok-coloured)
+  if ratio > 0 then
+    rgba(cr, PALETTE.ok, 1.0)
+    cairo_set_line_width(cr, HABIT_THICKNESS)
+    cairo_set_line_cap(cr, 1)
+    cairo_arc(cr, cx, cy, HABIT_RADIUS, -math.pi / 2,
+              -math.pi / 2 + 2 * math.pi * ratio)
+    cairo_stroke(cr)
+  end
+
+  -- Tiny count number inside when target > 1
+  if target > 1 then
+    rgba(cr, PALETTE.fg, 0.9)
+    draw_text_centered(cr, cx, cy, tostring(count), 9, 1)
+  end
+end
+
+local function draw_habits(cr, state)
+  local habits = state.habits_today or {}
+  if #habits == 0 then return end
+  local n = math.min(#habits, 7)
+  local total_w = (n - 1) * HABIT_SPACING + 2 * HABIT_RADIUS
+  local start_x = (PANEL_W - total_w) / 2 + HABIT_RADIUS
+  local cy = Y_HABITS_RINGS + HABIT_RADIUS
+  for i = 1, n do
+    local cx = start_x + (i - 1) * HABIT_SPACING
+    draw_habit_ring(cr, cx, cy, habits[i])
+  end
+end
+
+-- ── widget: calendar heatmap grid ───────────────────────────────────────────
+
+local function busy_count(busy, day)
+  if not busy then return 0 end
+  -- busy keys may be strings (json) or numbers; tolerate both
+  return tonumber(busy[tostring(day)] or busy[day]) or 0
+end
+
+local function draw_calendar(cr, state)
+  local cal = state.calendar_struct or {}
+  local today = tonumber(cal.today) or 0
+  local weeks = cal.weeks or {}
+  local busy = cal.busy or {}
+
+  -- Weekday header
+  cairo_select_font_face(cr, FONT_FAM, 0, 1)
+  cairo_set_font_size(cr, 9)
+  local labels = { 'M', 'T', 'W', 'T', 'F', 'S', 'S' }
+  rgba(cr, PALETTE.muted, 0.85)
+  for i, lbl in ipairs(labels) do
+    local cx = 12 + (i - 0.5) * CAL_CELL_W
+    draw_text_centered(cr, cx, Y_CAL_WEEKDAYS, lbl, 9, 1)
+  end
+
+  for row_i, week in ipairs(weeks) do
+    for col_i, day in ipairs(week) do
+      if day > 0 then
+        local cx = 12 + (col_i - 0.5) * CAL_CELL_W
+        local cy = Y_CAL_GRID + (row_i - 0.5) * CAL_CELL_H
+        local is_today = (day == today)
+        local n_busy = busy_count(busy, day)
+        local is_past = day < today
+
+        if is_today then
+          -- Filled accent disc behind today's number
+          rgba(cr, PALETTE.accent, 1.0)
+          cairo_arc(cr, cx, cy, 10, 0, 2 * math.pi)
+          cairo_fill(cr)
+          rgba(cr, PALETTE.bg, 1.0)  -- foreground reverses on the disc
+        elseif n_busy >= 3 then
+          rgba(cr, PALETTE.alert, 0.95)
+        elseif n_busy >= 1 then
+          rgba(cr, PALETTE.highlight, 0.95)
+        elseif is_past then
+          rgba(cr, PALETTE.muted, 0.40)
+        else
+          rgba(cr, PALETTE.fg, 0.80)
+        end
+
+        draw_text_centered(cr, cx, cy, tostring(day), 11, 0)
+
+        -- Busy day dot indicator (below the digit, skipped when today
+        -- since the filled disc already signals presence)
+        if n_busy >= 1 and not is_today then
+          rgba(cr, PALETTE.highlight, 0.9)
+          cairo_arc(cr, cx, cy + 8, 1.5, 0, 2 * math.pi)
+          cairo_fill(cr)
+        end
+      end
+    end
+  end
+end
+
+-- ── widget: section label (SmallCaps text above each widget cluster) ────────
+
+local function draw_section_label(cr, x, y, label)
+  draw_small_caps(cr, x, y, label, 9, PALETTE.section, 2)
+end
+
+-- ── main hook ───────────────────────────────────────────────────────────────
+
+function conky_draw_panel()
+  if conky_window == nil then return end
+  local cs = conky_surface()
+  if cs == nil then return end
+  local cr = cairo_create(cs)
+
+  local ok, state_or_err = pcall(load_state)
+  local state = ok and (state_or_err or {}) or {}
+
+  draw_divider(cr, Y_BANNER_DIVIDER)
+
+  draw_kpi_row(cr, state)
+
+  draw_section_label(cr, 12, Y_HABITS_LABEL, 'Habits')
+  draw_habits(cr, state)
+
+  draw_section_label(cr, 12, Y_CAL_LABEL, 'Calendar')
+  draw_calendar(cr, state)
+
+  cairo_destroy(cr)
+end

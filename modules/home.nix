@@ -198,6 +198,13 @@ let
         use_xft = true,
         font = '${cfg.font}',
         override_utf8_locale = true,
+
+        -- Cairo-drawn widgets (KPI rings, habit rings, calendar
+        -- heatmap). The Lua draws into the reserved region above the
+        -- text sections; conky.text uses ${voffset} to skip past the
+        -- widget zone before rendering the first text row.
+        lua_load = '${panelWidgetsLua}',
+        lua_draw_hook_post = 'conky_draw_panel',
         default_color = '${colors.fg}',
         color1 = '${colors.section}',
         color2 = '${colors.counter}',
@@ -210,22 +217,12 @@ let
     };
 
     conky.text = [[
-    ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${execpi 5 ${ageScript}}
-    ''${voffset 4}''${color7}─────────────────────────────''${color}
-
-    ''${color2}${icoBody glyph.bell}  ${boldExec counterScript "overdue"}  ''${color6}Overdue''${color}
-    ''${color2}${icoBody glyph.clock}  ${boldExec counterScript "today"}  ''${color6}Today''${color}
-    ''${color2}${icoBody glyph.calWeek}  ${boldExec counterScript "this_week"}  ''${color6}This week''${color}
-
-    ''${voffset 6}''${color1}${hdr "${icoHeader glyph.today} Today"}''${color}
+    ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${alignr 12}''${color6}''${execpi 5 ${ageScript}}''${color}
+    ''${voffset ${toString widgetsHeight}}
+    ''${color1}${hdr "${icoHeader glyph.today} Today"}''${color}
     ''${execi 5 ${todayScript}}
     ''${execpi 30 ${doneTodayScript}}
     ''${execpi 30 ${inboxScript}}
-    ''${execpi 30 ${habitsScript}}
-
-    ''${voffset 6}''${color1}${hdr "${icoHeader glyph.calWeek} Calendar"}''${color}
-    ''${font ${calendarFontBold}}''${color1}Mo Tu We Th Fr Sa Su''${color}''${font ${cfg.font}}
-    ${cal_ "\${execpi 30 ${calScript}}"}
     ''${execpi 30 ${notesScript}}
     ''${execpi 5 ${errScript}}
     ]];
@@ -236,6 +233,32 @@ let
     api_base_url = "${cfg.apiBaseUrl}"
     poll_seconds = ${toString cfg.pollSeconds}
   '';
+
+  # Panel-widgets Lua script — KPI rings, habit rings, calendar
+  # heatmap. Substitute palette / paths / dimensions at build time so
+  # the script reads no env or config at draw time.
+  panelWidgetsLua = pkgs.runCommand "panel-widgets.lua" { } ''
+    substitute ${../src/conky/lua/panel-widgets.lua.in} $out \
+      --replace-fail '@STATE@'        '${stateFile}' \
+      --replace-fail '@PANEL_W@'      '${toString cfg.minWidth}' \
+      --replace-fail '@FONT_FAMILY@'  '${cfg.fontFamily}' \
+      --replace-fail '@BG@'           '${colors.bg}' \
+      --replace-fail '@FG@'           '${colors.fg}' \
+      --replace-fail '@MUTED@'        '${colors.muted}' \
+      --replace-fail '@DIVIDER@'      '${colors.divider}' \
+      --replace-fail '@SECTION@'      '${colors.section}' \
+      --replace-fail '@COUNTER@'      '${colors.counter}' \
+      --replace-fail '@HIGHLIGHT@'    '${colors.highlight}' \
+      --replace-fail '@ALERT@'        '${colors.alert}' \
+      --replace-fail '@OK@'           '${colors.ok}' \
+      --replace-fail '@ACCENT@'       '${colors.accent}'
+  '';
+
+  # Vertical-space reservation between the banner and the text
+  # sections, so the cairo widgets above (KPI rings, habits, calendar)
+  # don't collide with the text below. Pixel values mirror the Y
+  # constants in panel-widgets.lua.
+  widgetsHeight = 360;
 
 
 in

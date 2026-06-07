@@ -278,6 +278,18 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
     calendar_highlights = [
         f"→ {c['when']}  {c['title']}" for c in calendar_upcoming[:2]
     ]
+    # Raw structured calendar data for the cairo widget. The conky Lua
+    # panel-widgets script needs the month layout as a 2D array, the
+    # today day-of-month, and the busy-count map — it then draws the
+    # circles itself instead of consuming pre-rendered text.
+    cal_obj = calendar_mod.Calendar(firstweekday=0)
+    calendar_struct = {
+        "year": today_dt.year,
+        "month": today_dt.month,
+        "today": today_dt.day,
+        "weeks": cal_obj.monthdayscalendar(today_dt.year, today_dt.month),
+        "busy": busy_counts,
+    }
 
     # ── Done today (proxy: status=done AND updated_at[:10] == today) ─────
     done_items: list[dict[str, Any]] = []
@@ -371,6 +383,7 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
         "calendar_upcoming": calendar_upcoming,
         "calendar_grid": calendar_grid,
         "calendar_highlights": calendar_highlights,
+        "calendar_struct": calendar_struct,
     }
 
 
