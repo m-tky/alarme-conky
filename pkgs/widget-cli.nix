@@ -1,5 +1,6 @@
 { stdenvNoCC, pyEnv, makeWrapper, wrapGAppsHook4, gtk4, libadwaita
-, gobject-introspection, fuzzel, libnotify, jq, xdg-utils, wl-clipboard }:
+, gtk4-layer-shell, gobject-introspection, fuzzel, libnotify, jq
+, xdg-utils, wl-clipboard }:
 
 # wrapGAppsHook4 is the canonical way to assemble GI_TYPELIB_PATH for a
 # GTK4 program — it walks the propagated buildInputs and concatenates
@@ -14,7 +15,7 @@ stdenvNoCC.mkDerivation {
   src = ../src/widget_cli;
   strictDeps = true;
   nativeBuildInputs = [ makeWrapper wrapGAppsHook4 gobject-introspection ];
-  buildInputs = [ gtk4 libadwaita ];
+  buildInputs = [ gtk4 libadwaita gtk4-layer-shell ];
 
   installPhase = ''
     runHook preInstall

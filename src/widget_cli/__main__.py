@@ -14,6 +14,7 @@ from . import (
     habit,
     jump,
     palette,
+    pomo_overlay,
     pomodoro,
     snooze,
     toggle_conky,
@@ -30,6 +31,7 @@ SUBCOMMANDS = {
     "palette": palette,
     "toggle-conky": toggle_conky,
     "calendar": calendar_popup,
+    "pomo-overlay": pomo_overlay,
 }
 
 
