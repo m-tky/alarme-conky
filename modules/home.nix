@@ -112,6 +112,10 @@ let
   icoHeader = g: "\${font ${nfHeaderFont}}${g}\${font ${headerFontBold}}";
   # Section headers — bold + larger. Switch back to plain body on exit.
   hdr = body: "\${font ${headerFontBold}}${body}\${font ${cfg.font}}";
+  # Calendar grid — sits one size below section titles so the title
+  # outranks the cell numbers visually. Bold weekday header is set
+  # inline at the callsite (no helper needed).
+  cal_ = body: "\${font ${calendarFont}}${body}\${font ${cfg.font}}";
   # Counter numbers — bold within their row, surrounded by regular icon
   # + label so the digit reads as the data point.
   boldExec = script: arg:
