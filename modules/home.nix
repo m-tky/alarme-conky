@@ -68,14 +68,18 @@ let
   # ${font}-switch into a Nerd Font around each glyph and back to the
   # main font afterwards. Sized to match the surrounding text so glyph
   # baselines stay aligned with their adjacent characters.
-  nfBodyFont     = "FiraCode Nerd Font Mono:size=${toString cfg.bodySize}";
-  nfHeaderFont   = "FiraCode Nerd Font Mono:size=${toString cfg.headerSize}";
-  headerFont     = "${cfg.fontFamily}:size=${toString cfg.headerSize}";
+  nfBodyFont       = "FiraCode Nerd Font Mono:size=${toString cfg.bodySize}";
+  nfHeaderFont     = "FiraCode Nerd Font Mono:size=${toString cfg.headerSize}";
+  headerFont       = "${cfg.fontFamily}:size=${toString cfg.headerSize}";
   # Bold variants. ``:style=Bold`` is fontconfig's portable way to ask
   # for the bold cut; the family must actually ship a Bold face (every
   # Moralerspace variant does) or conky silently falls back to regular.
-  bodyFontBold   = "${cfg.fontFamily}:style=Bold:size=${toString cfg.bodySize}";
-  headerFontBold = "${cfg.fontFamily}:style=Bold:size=${toString cfg.headerSize}";
+  bodyFontBold     = "${cfg.fontFamily}:style=Bold:size=${toString cfg.bodySize}";
+  headerFontBold   = "${cfg.fontFamily}:style=Bold:size=${toString cfg.headerSize}";
+  # Calendar-specific variants: one step down from header by default
+  # so the grid sits visually below the section title.
+  calendarFont     = "${cfg.fontFamily}:size=${toString cfg.calendarSize}";
+  calendarFontBold = "${cfg.fontFamily}:style=Bold:size=${toString cfg.calendarSize}";
 
   # Nerd Font glyphs by name. We materialize each from its codepoint via
   # builtins.fromJSON because typing the raw PUA character into a Nix
@@ -216,8 +220,8 @@ let
     ''${execpi 30 ${habitsScript}}
 
     ''${voffset 6}''${color1}${hdr "${icoHeader glyph.calWeek} Calendar"}''${color}
-    ''${font ${headerFontBold}}''${color1}Mo Tu We Th Fr Sa Su''${color}''${font ${cfg.font}}
-    ${hdr "\${execpi 30 ${calScript}}"}
+    ''${font ${calendarFontBold}}''${color1}Mo Tu We Th Fr Sa Su''${color}''${font ${cfg.font}}
+    ${cal_ "\${execpi 30 ${calScript}}"}
     ''${execpi 30 ${notesScript}}
     ''${execpi 5 ${errScript}}
     ]];
@@ -323,10 +327,21 @@ in
     headerSize = lib.mkOption {
       type = lib.types.ints.positive;
       default = 14;
+      description = "Header font size — used for section titles.";
+    };
+
+    calendarSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      # One step below headerSize: the weekday row + grid sit just
+      # under the section title and read as "part of the calendar",
+      # but a tiny size step keeps them from competing with the
+      # section title for emphasis.
+      default = cfg.headerSize - 1;
+      defaultText = "headerSize - 1";
       description = ''
-        Header font size — used for section titles and the Calendar
-        grid (so the grid reads as part of its own heading rather
-        than the body).
+        Font size for the calendar weekday row and the month grid.
+        Separate from headerSize so you can dial the grid down (or up)
+        without resizing the rest of the section titles.
       '';
     };
 
