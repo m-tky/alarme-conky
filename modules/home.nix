@@ -66,8 +66,11 @@ let
   # Nerd Font used for icon glyphs only. The main UI font (Moralerspace
   # Argon by default) doesn't ship Font-Awesome / Material icons, so we
   # ${font}-switch into a Nerd Font around each glyph and back to the
-  # main font afterwards.
-  nfFont = "FiraCode Nerd Font Mono:size=10";
+  # main font afterwards. Sized to match the surrounding text so glyph
+  # baselines stay aligned with their adjacent characters.
+  nfBodyFont   = "FiraCode Nerd Font Mono:size=${toString cfg.bodySize}";
+  nfHeaderFont = "FiraCode Nerd Font Mono:size=${toString cfg.headerSize}";
+  headerFont   = "${cfg.fontFamily}:size=${toString cfg.headerSize}";
 
   # Nerd Font glyphs by name. We materialize each from its codepoint via
   # builtins.fromJSON because typing the raw PUA character into a Nix
@@ -89,11 +92,14 @@ let
     warning   = fromCp "F071";  # error
     refresh   = fromCp "F021";  # age badge (replaces ⟳)
   };
-  # Small helper: switch into NF font, print glyph, switch back to main.
-  # Conky's ``${font}`` with no argument restores the default font set
-  # on the conky.config block, so ``${font}<glyph>${font}`` would be
-  # wrong — we explicitly switch back to the main font.
-  ico = g: "\${font ${nfFont}}${g}\${font ${cfg.font}}";
+  # Two icon helpers — one sized to body text, one sized to headers.
+  # We always switch back to a concrete font (never the empty
+  # ``${font}``) so subsequent text renders at the size we intend
+  # rather than whatever happened to be in effect previously.
+  icoBody   = g: "\${font ${nfBodyFont}}${g}\${font ${cfg.font}}";
+  icoHeader = g: "\${font ${nfHeaderFont}}${g}\${font ${headerFont}}";
+  # Wrap a block in the header font; restore body font on exit.
+  hdr = body: "\${font ${headerFont}}${body}\${font ${cfg.font}}";
 
   mkBlock = name: pkgs.writeShellScript "wc-${name}" ''
     export STATE_FILE='${stateFile}'
@@ -177,22 +183,22 @@ let
     };
 
     conky.text = [[
-    ''${color1}${ico glyph.bolt} Alarme''${color}  ''${execpi 5 ${ageScript}}
-    ''${voffset 2}''${color7}─────────────────────────────''${color}
+    ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${execpi 5 ${ageScript}}
+    ''${voffset 4}''${color7}─────────────────────────────''${color}
 
-    ''${color2}${ico glyph.bell}  ''${execi 5 ${counterScript} overdue}  ''${color6}Overdue''${color}
-    ''${color2}${ico glyph.clock}  ''${execi 5 ${counterScript} today}  ''${color6}Today''${color}
-    ''${color2}${ico glyph.calWeek}  ''${execi 5 ${counterScript} this_week}  ''${color6}This week''${color}
+    ''${color2}${icoBody glyph.bell}  ''${execi 5 ${counterScript} overdue}  ''${color6}Overdue''${color}
+    ''${color2}${icoBody glyph.clock}  ''${execi 5 ${counterScript} today}  ''${color6}Today''${color}
+    ''${color2}${icoBody glyph.calWeek}  ''${execi 5 ${counterScript} this_week}  ''${color6}This week''${color}
 
-    ''${voffset 4}''${color1}${ico glyph.today} Today''${color}
+    ''${voffset 6}''${color1}${hdr "${icoHeader glyph.today} Today"}''${color}
     ''${execi 5 ${todayScript}}
     ''${execpi 30 ${doneTodayScript}}
     ''${execpi 30 ${inboxScript}}
     ''${execpi 30 ${habitsScript}}
     ''${execpi 1 ${pomoScript}}
 
-    ''${voffset 4}''${color1}${ico glyph.calWeek} Calendar''${color}
-    ''${execpi 30 ${calScript}}
+    ''${voffset 6}''${color1}${hdr "${icoHeader glyph.calWeek} Calendar"}''${color}
+    ${hdr "\${execpi 30 ${calScript}}"}
     ''${execpi 30 ${notesScript}}
     ''${execpi 5 ${errScript}}
     ]];
@@ -249,11 +255,14 @@ in
 
     minWidth = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 320;
+      # Derived from bodySize so the surface scales when the user
+      # bumps fonts — at 12pt mono, 50 chars × ~7px ≈ 360px; we add
+      # padding for icons and counter widget margins.
+      default = cfg.bodySize * 36;
+      defaultText = "bodySize * 36 (≈ 50 chars + padding)";
       description = ''
-        Lower bound on the panel width. Conky's layer-shell surface
-        will never shrink below this; it grows up to ``maxWidth`` (or
-        unbounded if that's null) to fit the widest visible line.
+        Lower bound on the panel width. Default scales with
+        ``bodySize`` so larger fonts don't clip task titles.
       '';
     };
 
@@ -271,20 +280,46 @@ in
       '';
     };
 
-    font = lib.mkOption {
+    fontFamily = lib.mkOption {
       type = lib.types.str;
-      # Moralerspace Argon: a Japanese-aware monospace built on the
+      # Moralerspace Argon: a Japanese-aware monospace on the
       # IBM Plex Mono + Hack lineage. Picked over plain FiraCode/JBM
       # because mixed JP/EN task titles render with correct half/full
       # widths — Japanese glyphs occupy exactly two ASCII cells, which
-      # keeps the calendar columns aligned even when a title above
-      # contains kanji. MUST stay monospace; a proportional fallback
-      # like IBM Plex Sans JP breaks the calendar grid.
-      #
-      # Size 10 matches kitty (`font_size 10`) and fuzzel so the three
-      # surfaces feel like one.
-      default = "Moralerspace Argon:size=10";
-      description = "Conky font string. MUST be monospace, or the calendar grid won't align.";
+      # keeps the calendar columns aligned when a title contains
+      # kanji. MUST stay monospace; a proportional fallback like
+      # IBM Plex Sans JP breaks the calendar grid.
+      default = "Moralerspace Argon";
+      description = "Body / header font family. MUST be monospace.";
+    };
+
+    bodySize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 12;
+      description = "Body font size (counters, tasks, inbox rows).";
+    };
+
+    headerSize = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 14;
+      description = ''
+        Header font size — used for section titles and the Calendar
+        grid (so the grid reads as part of its own heading rather
+        than the body).
+      '';
+    };
+
+    font = lib.mkOption {
+      type = lib.types.str;
+      default = "${cfg.fontFamily}:size=${toString cfg.bodySize}";
+      defaultText = "\${fontFamily}:size=\${bodySize}";
+      description = ''
+        Full conky font string for body text. Derived from
+        ``fontFamily`` + ``bodySize`` by default; override here if
+        you need a totally different font (e.g. a Nerd Font that
+        also carries Japanese, so the ${"\\${font}"} switches in the
+        template can be removed).
+      '';
     };
 
     backgroundOpacity = lib.mkOption {
