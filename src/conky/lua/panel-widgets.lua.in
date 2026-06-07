@@ -37,23 +37,23 @@ local PALETTE = {
 -- These match the ${voffset} reservations in conky.text. Adjust both
 -- in lockstep if you change widget sizes.
 
-local Y_BANNER_DIVIDER = 36
-local Y_KPI_RINGS      = 56   -- top of ring row
-local KPI_RADIUS       = 26
-local KPI_THICKNESS    = 4
-local KPI_LABEL_GAP    = 12
+local Y_BANNER_DIVIDER = 42
+local Y_KPI_RINGS      = 64   -- top of ring row
+local KPI_RADIUS       = 32
+local KPI_THICKNESS    = 5
+local KPI_LABEL_GAP    = 14
 
-local Y_HABITS_LABEL   = Y_KPI_RINGS + KPI_RADIUS * 2 + 36
-local Y_HABITS_RINGS   = Y_HABITS_LABEL + 16
-local HABIT_RADIUS     = 11
-local HABIT_THICKNESS  = 3
-local HABIT_SPACING    = 30
+local Y_HABITS_LABEL   = Y_KPI_RINGS + KPI_RADIUS * 2 + 42
+local Y_HABITS_RINGS   = Y_HABITS_LABEL + 20
+local HABIT_RADIUS     = 14
+local HABIT_THICKNESS  = 4
+local HABIT_SPACING    = 38
 
-local Y_CAL_LABEL      = Y_HABITS_RINGS + HABIT_RADIUS * 2 + 28
-local Y_CAL_WEEKDAYS   = Y_CAL_LABEL + 16
-local Y_CAL_GRID       = Y_CAL_WEEKDAYS + 16
+local Y_CAL_LABEL      = Y_HABITS_RINGS + HABIT_RADIUS * 2 + 34
+local Y_CAL_WEEKDAYS   = Y_CAL_LABEL + 20
+local Y_CAL_GRID       = Y_CAL_WEEKDAYS + 20
 local CAL_CELL_W       = (PANEL_W - 24) / 7
-local CAL_CELL_H       = 22
+local CAL_CELL_H       = 28
 
 -- ── helpers ─────────────────────────────────────────────────────────────────
 
@@ -232,18 +232,18 @@ local function draw_kpi_ring(cr, cx, cy, count, label, accent_hex, soft_cap)
 
   -- Number in centre
   rgba(cr, PALETTE.fg, 1.0)
-  draw_text_centered(cr, cx, cy, tostring(count), 22, 1)
+  draw_text_centered(cr, cx, cy, tostring(count), 28, 1)
 
   -- Label below, SmallCaps
   cairo_select_font_face(cr, FONT_FAM, 0, 1)
-  cairo_set_font_size(cr, 8)
+  cairo_set_font_size(cr, 10)
   local label_w = 0
   for ch in label:upper():gmatch('.') do
     local e = text_extents(cr, ch)
-    label_w = label_w + e.x_advance + 1.6
+    label_w = label_w + e.x_advance + 1.8
   end
   rgba(cr, PALETTE.muted, 1.0)
-  draw_small_caps(cr, cx - label_w / 2, cy + KPI_RADIUS + KPI_LABEL_GAP, label, 8, PALETTE.muted, 1.6)
+  draw_small_caps(cr, cx - label_w / 2, cy + KPI_RADIUS + KPI_LABEL_GAP, label, 10, PALETTE.muted, 1.8)
 end
 
 local function draw_kpi_row(cr, state)
@@ -285,7 +285,7 @@ local function draw_habit_ring(cr, cx, cy, habit)
   -- Tiny count number inside when target > 1
   if target > 1 then
     rgba(cr, PALETTE.fg, 0.9)
-    draw_text_centered(cr, cx, cy, tostring(count), 9, 1)
+    draw_text_centered(cr, cx, cy, tostring(count), 12, 1)
   end
 end
 
@@ -318,12 +318,12 @@ local function draw_calendar(cr, state)
 
   -- Weekday header
   cairo_select_font_face(cr, FONT_FAM, 0, 1)
-  cairo_set_font_size(cr, 9)
+  cairo_set_font_size(cr, 11)
   local labels = { 'M', 'T', 'W', 'T', 'F', 'S', 'S' }
   rgba(cr, PALETTE.muted, 0.85)
   for i, lbl in ipairs(labels) do
     local cx = 12 + (i - 0.5) * CAL_CELL_W
-    draw_text_centered(cr, cx, Y_CAL_WEEKDAYS, lbl, 9, 1)
+    draw_text_centered(cr, cx, Y_CAL_WEEKDAYS, lbl, 11, 1)
   end
 
   for row_i, week in ipairs(weeks) do
@@ -339,7 +339,7 @@ local function draw_calendar(cr, state)
           -- Filled accent disc behind today's number
           rgba(cr, PALETTE.accent, 1.0)
           cairo_new_sub_path(cr)
-          cairo_arc(cr, cx, cy, 10, 0, 2 * math.pi)
+          cairo_arc(cr, cx, cy, 12, 0, 2 * math.pi)
           cairo_fill(cr)
           rgba(cr, PALETTE.bg, 1.0)  -- foreground reverses on the disc
         elseif n_busy >= 3 then
@@ -352,14 +352,14 @@ local function draw_calendar(cr, state)
           rgba(cr, PALETTE.fg, 0.80)
         end
 
-        draw_text_centered(cr, cx, cy, tostring(day), 11, 0)
+        draw_text_centered(cr, cx, cy, tostring(day), 13, 0)
 
         -- Busy day dot indicator (below the digit, skipped when today
         -- since the filled disc already signals presence)
         if n_busy >= 1 and not is_today then
           rgba(cr, PALETTE.highlight, 0.9)
           cairo_new_sub_path(cr)
-          cairo_arc(cr, cx, cy + 8, 1.5, 0, 2 * math.pi)
+          cairo_arc(cr, cx, cy + 10, 1.8, 0, 2 * math.pi)
           cairo_fill(cr)
         end
       end
@@ -370,7 +370,7 @@ end
 -- ── widget: section label (SmallCaps text above each widget cluster) ────────
 
 local function draw_section_label(cr, x, y, label)
-  draw_small_caps(cr, x, y, label, 9, PALETTE.section, 2)
+  draw_small_caps(cr, x, y, label, 11, PALETTE.section, 2.4)
 end
 
 -- ── main hook ───────────────────────────────────────────────────────────────

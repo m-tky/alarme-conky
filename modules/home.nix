@@ -258,7 +258,7 @@ let
   # sections, so the cairo widgets above (KPI rings, habits, calendar)
   # don't collide with the text below. Pixel values mirror the Y
   # constants in panel-widgets.lua.
-  widgetsHeight = 360;
+  widgetsHeight = 440;
 
 
 in
@@ -347,13 +347,13 @@ in
 
     bodySize = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 12;
+      default = 14;
       description = "Body font size (counters, tasks, inbox rows).";
     };
 
     headerSize = lib.mkOption {
       type = lib.types.ints.positive;
-      default = 14;
+      default = 16;
       description = "Header font size — used for section titles.";
     };
 
