@@ -68,7 +68,6 @@ let
   # ${font}-switch into a Nerd Font around each glyph and back to the
   # main font afterwards.
   nfFont = "FiraCode Nerd Font Mono:size=10";
-  bigFont = "Moralerspace Argon:size=18";
 
   # Nerd Font glyphs by name. We materialize each from its codepoint via
   # builtins.fromJSON because typing the raw PUA character into a Nix
@@ -115,6 +114,7 @@ let
     export GLYPH_WARN='${glyph.warning}'
     export GLYPH_STOPWATCH='${glyph.stopwatch}'
     export GLYPH_REFRESH='${glyph.refresh}'
+    export GLYPH_FIRE='${glyph.fire}'
     exec ${pkgs.bash}/bin/bash ${../src/conky/scripts}/${name}.sh "$@"
   '';
 
@@ -173,22 +173,20 @@ let
 
     conky.text = [[
     ''${color1}${ico glyph.bolt} Alarme''${color}  ''${execpi 5 ${ageScript}}
-    ''${voffset 4}''${color7}─────────────────────────────''${color}
+    ''${voffset 2}''${color7}─────────────────────────────''${color}
 
-    ''${voffset 4}''${color2}${ico glyph.bell}  ''${font ${bigFont}}''${execi 5 ${counterScript} overdue}''${font ${cfg.font}}  ''${color6}Overdue''${color}
-    ''${color2}${ico glyph.clock}  ''${font ${bigFont}}''${execi 5 ${counterScript} today}''${font ${cfg.font}}  ''${color6}Today''${color}
-    ''${color2}${ico glyph.calWeek}  ''${font ${bigFont}}''${execi 5 ${counterScript} this_week}''${font ${cfg.font}}  ''${color6}This week''${color}
+    ''${color2}${ico glyph.bell}  ''${execi 5 ${counterScript} overdue}  ''${color6}Overdue''${color}
+    ''${color2}${ico glyph.clock}  ''${execi 5 ${counterScript} today}  ''${color6}Today''${color}
+    ''${color2}${ico glyph.calWeek}  ''${execi 5 ${counterScript} this_week}  ''${color6}This week''${color}
 
-    ''${voffset 6}''${color1}${ico glyph.today} Today''${color}
+    ''${voffset 4}''${color1}${ico glyph.today} Today''${color}
     ''${execi 5 ${todayScript}}
     ''${execpi 30 ${doneTodayScript}}
     ''${execpi 30 ${inboxScript}}
-
-    ''${voffset 6}''${color1}${ico glyph.fire} Habits''${color}
     ''${execpi 30 ${habitsScript}}
     ''${execpi 1 ${pomoScript}}
 
-    ''${voffset 6}''${color1}${ico glyph.calWeek} Calendar''${color}
+    ''${voffset 4}''${color1}${ico glyph.calWeek} Calendar''${color}
     ''${execpi 30 ${calScript}}
     ''${execpi 30 ${notesScript}}
     ''${execpi 5 ${errScript}}
