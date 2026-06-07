@@ -92,6 +92,13 @@ class PomoOverlay(Gtk.Application):
             self._window.present()
             return
 
+        # Apply the shared Nightfox theme so palette tokens are
+        # available for any future GTK widgets (the ring itself is
+        # cairo-drawn; the theme matters for text bubbles, popovers,
+        # etc. should we add them).
+        from .shared.theme import apply_theme
+        apply_theme()
+
         win = Gtk.ApplicationWindow(application=self)
         win.set_default_size(SIZE, SIZE)
         win.set_decorated(False)

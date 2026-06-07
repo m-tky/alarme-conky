@@ -36,25 +36,7 @@ from .shared.fetcher_signal import wake_fetcher  # noqa: E402
 from .shared.format import fetch_project_map, parse_validation_error  # noqa: E402
 from .shared.http import client  # noqa: E402
 from .shared.notify import toast  # noqa: E402
-
-_FONT_CSS = """
-* { font-family: "Moralerspace Argon", monospace; }
-"""
-
-
-def _apply_font_css() -> None:
-    """Force Moralerspace Argon across every widget. libadwaita's
-    default font (Cantarell on most systems) doesn't match the conky
-    panel or fuzzel, so without this the GTK windows feel visually
-    detached from the rest of the alarme-conky surface."""
-    display = Gdk.Display.get_default()
-    if display is None:
-        return
-    provider = Gtk.CssProvider()
-    provider.load_from_string(_FONT_CSS)
-    Gtk.StyleContext.add_provider_for_display(
-        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_USER
-    )
+from .shared.theme import apply_theme  # noqa: E402
 
 
 _HHMM = re.compile(r"^\s*(\d{1,2}):(\d{2})\s*$")
@@ -557,7 +539,7 @@ class _FormApp(Adw.Application):
         self._on_created = on_created
 
     def do_activate(self) -> None:
-        _apply_font_css()
+        apply_theme()
         win = TaskFormWindow(
             self, initial_date=self._initial_date, on_created=self._on_created
         )

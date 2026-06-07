@@ -25,21 +25,7 @@ from .shared.fetcher_signal import wake_fetcher  # noqa: E402
 from .shared.format import fetch_project_map  # noqa: E402
 from .shared.http import client  # noqa: E402
 from .shared.notify import toast  # noqa: E402
-
-
-_FONT_CSS = '* { font-family: "Moralerspace Argon", monospace; }'
-
-
-def _apply_font_css() -> None:
-    """Match the conky panel + fuzzel font instead of GTK's default."""
-    display = Gdk.Display.get_default()
-    if display is None:
-        return
-    provider = Gtk.CssProvider()
-    provider.load_from_string(_FONT_CSS)
-    Gtk.StyleContext.add_provider_for_display(
-        display, provider, Gtk.STYLE_PROVIDER_PRIORITY_USER
-    )
+from .shared.theme import apply_theme  # noqa: E402
 
 
 def _fetch_open_tasks() -> list[dict[str, Any]]:
@@ -282,7 +268,7 @@ class CalendarApp(Adw.Application):
         super().__init__(application_id="org.wayland-conky.Calendar")
 
     def do_activate(self) -> None:
-        _apply_font_css()
+        apply_theme()
         win = CalendarWindow(self)
         win.present()
 
