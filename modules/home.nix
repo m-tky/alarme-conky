@@ -216,15 +216,13 @@ let
         color8 = '${colors.accent}',
     };
 
+    -- Lua draws every visible pixel (see panel-widgets.lua). conky.text
+    -- here is just a height reservation so the layer-shell surface is
+    -- the right size — a single ''${voffset} that mirrors panelHeight.
+    -- A trailing space keeps conky from treating the body as empty
+    -- (some builds collapse the surface to zero height in that case).
     conky.text = [[
-    ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${alignr 12}''${color6}''${execpi 5 ${ageScript}}''${color}
-    ''${voffset ${toString widgetsHeight}}
-    ''${color1}${hdr "${icoHeader glyph.today} Today"}''${color}
-    ''${execi 5 ${todayScript}}
-    ''${execpi 30 ${doneTodayScript}}
-    ''${execpi 30 ${inboxScript}}
-    ''${execpi 30 ${notesScript}}
-    ''${execpi 5 ${errScript}}
+    ''${voffset ${toString cfg.panelHeight}}
     ]];
   '';
 
@@ -242,6 +240,8 @@ let
       --replace-fail '@STATE@'        '${stateFile}' \
       --replace-fail '@PANEL_W@'      '${toString cfg.minWidth}' \
       --replace-fail '@FONT_FAMILY@'  '${cfg.fontFamily}' \
+      --replace-fail '@BODY_SIZE@'    '${toString cfg.bodySize}' \
+      --replace-fail '@HEADER_SIZE@'  '${toString cfg.headerSize}' \
       --replace-fail '@BG@'           '${colors.bg}' \
       --replace-fail '@FG@'           '${colors.fg}' \
       --replace-fail '@MUTED@'        '${colors.muted}' \
@@ -253,12 +253,6 @@ let
       --replace-fail '@OK@'           '${colors.ok}' \
       --replace-fail '@ACCENT@'       '${colors.accent}'
   '';
-
-  # Vertical-space reservation between the banner and the text
-  # sections, so the cairo widgets above (KPI rings, habits, calendar)
-  # don't collide with the text below. Pixel values mirror the Y
-  # constants in panel-widgets.lua.
-  widgetsHeight = 440;
 
 
 in
@@ -380,6 +374,21 @@ in
         Full conky font string for body text. Derived from
         ``fontFamily`` + ``bodySize`` by default; override here if
         you need a totally different body font.
+      '';
+    };
+
+    panelHeight = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 900;
+      description = ''
+        Total height in pixels reserved for the cairo-drawn panel.
+        Wayland layer-shell needs a definite surface height at startup,
+        and the Lua draw hook paints freely within this region — so
+        this is effectively the maximum content height. Pick a value
+        that comfortably exceeds your typical content load (banner +
+        KPI + habits + calendar + ~8 today tasks + ~4 done + ~4 inbox
+        + ~3 notes lands around 800px); anything beyond is clipped
+        below the surface.
       '';
     };
 
