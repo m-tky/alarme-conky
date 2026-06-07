@@ -22,6 +22,7 @@ require('cairo')
 
 local STATE        = '@STATE@'
 local PANEL_W      = @PANEL_W@
+local PANEL_H      = @PANEL_H@
 local FONT_FAM     = '@FONT_FAMILY@'
 local BODY_SIZE    = @BODY_SIZE@
 local HEADER_SIZE  = @HEADER_SIZE@
@@ -136,15 +137,29 @@ local function truncate(cr, s, max_w, family, weight, size)
 end
 
 -- ── JSON loading (state.json) ──────────────────────────────────────────────
+--
+-- Cache the parsed state by raw-content equality. The fetcher
+-- rewrites state.json every poll cycle (~30s), but our draw hook
+-- fires every second — so most frames we'd otherwise re-parse the
+-- same JSON we parsed last frame. The parse is by far the most
+-- expensive thing in the hot path; skipping it when the content is
+-- byte-identical cuts the per-frame cost dramatically and removes
+-- the visible "I-took-too-long" flicker.
 
 local _decode  -- forward decl so load_state can pcall it
+local _cached_raw   = nil
+local _cached_state = {}
+
 local function load_state()
   local f = io.open(STATE, 'r')
-  if not f then return {} end
+  if not f then return _cached_state end
   local raw = f:read('*a')
   f:close()
+  if raw == _cached_raw then return _cached_state end
+  _cached_raw = raw
   local ok, decoded = pcall(_decode, raw)
-  return ok and (decoded or {}) or {}
+  _cached_state = ok and (decoded or {}) or {}
+  return _cached_state
 end
 
 -- Minimal JSON decoder — handles every shape the fetcher emits.
@@ -483,12 +498,28 @@ local function draw_error_row(cr, y, err)
 end
 
 -- ── main draw hook ─────────────────────────────────────────────────────────
+--
+-- Wayland conky runs in single-buffer mode (the layer-shell surface
+-- IS the drawing buffer — there's no separate back buffer to swap).
+-- That means anything that draws between conky's per-frame clear and
+-- the next compositor frame callback is visible on screen, including
+-- the half-drawn intermediate state of our cairo paths. The user
+-- perceives that as flicker on every redraw.
+--
+-- The fix is to render everything onto an in-memory ARGB32 surface
+-- first, then ``cairo_paint`` the whole image onto conky's surface
+-- in one shot. The blit is a single rectangular memcpy from cairo's
+-- perspective, so there's no intermediate "half-drawn" frame.
 
 function conky_draw_panel()
   if conky_window == nil then return end
   local cs = conky_surface()
   if cs == nil then return end
-  local cr = cairo_create(cs)
+
+  -- Offscreen ARGB32 surface — same size as the panel. We always
+  -- (re)create it per frame; cairo image surfaces are cheap.
+  local off = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, PANEL_W, PANEL_H)
+  local cr = cairo_create(off)
 
   local ok, st = pcall(load_state)
   st = (ok and st) or {}
@@ -604,4 +635,17 @@ function conky_draw_panel()
   end
 
   cairo_destroy(cr)
+
+  -- One-shot blit of the fully-drawn offscreen surface onto conky's
+  -- real (visible) surface. CAIRO_OPERATOR_SOURCE — not the default
+  -- OVER — so the destination is *replaced* by our pixels rather
+  -- than alpha-blended on top of whatever conky already painted;
+  -- this preserves our transparent regions (so the wallpaper shows
+  -- through unmodified) instead of double-stacking the bg colour.
+  local outr = cairo_create(cs)
+  cairo_set_operator(outr, CAIRO_OPERATOR_SOURCE)
+  cairo_set_source_surface(outr, off, 0, 0)
+  cairo_paint(outr)
+  cairo_destroy(outr)
+  cairo_surface_destroy(off)
 end

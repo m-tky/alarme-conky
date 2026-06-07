@@ -185,15 +185,18 @@ let
 
         own_window = true,
         own_window_type = 'panel',
-        own_window_argb_visual = true,
-        own_window_argb_value = ${toString cfg.backgroundOpacity},
-        own_window_colour = '${colors.bg}',
-        -- own_window_transparent=true makes conky paint nothing for
-        -- the background — text floats on the wallpaper. We toggle
-        -- this on when the user has set backgroundOpacity to 0; the
-        -- argb path still works for the colour-blend case (1–254).
-        own_window_transparent = ${if cfg.backgroundOpacity == 0 then "true" else "false"},
-        double_buffer = true,
+        -- Modern colour-with-alpha syntax (#RRGGBBAA). The deprecated
+        -- own_window_argb_visual / own_window_argb_value /
+        -- own_window_transparent triplet is gone — one colour string
+        -- encodes both the fill and its opacity.
+        own_window_colour = '#${colors.bg}${
+          let h = lib.toHexString cfg.backgroundOpacity;
+          in if lib.stringLength h < 2 then "0" + h else h
+        }',
+        -- double_buffer is ignored on Wayland (layer-shell forces
+        -- single-buffer mode); we Lua-side composite onto an
+        -- offscreen surface in panel-widgets.lua to avoid the
+        -- partial-frame flicker that single-buffer otherwise shows.
 
         use_xft = true,
         font = '${cfg.font}',
@@ -239,6 +242,7 @@ let
     substitute ${../src/conky/lua/panel-widgets.lua.in} $out \
       --replace-fail '@STATE@'        '${stateFile}' \
       --replace-fail '@PANEL_W@'      '${toString cfg.minWidth}' \
+      --replace-fail '@PANEL_H@'      '${toString cfg.panelHeight}' \
       --replace-fail '@FONT_FAMILY@'  '${cfg.fontFamily}' \
       --replace-fail '@BODY_SIZE@'    '${toString cfg.bodySize}' \
       --replace-fail '@HEADER_SIZE@'  '${toString cfg.headerSize}' \
