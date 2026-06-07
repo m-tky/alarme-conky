@@ -110,7 +110,7 @@ let
     export COLOR_ACCENT='${colors.accent}'
     export COLOR_SECTION='${colors.section}'
     export COLOR_MUTED='${colors.muted}'
-    export NF_FONT='${nfFont}'
+    export NF_FONT='${nfBodyFont}'
     export MAIN_FONT='${cfg.font}'
     # Glyphs are exported as raw UTF-8 so scripts can ``printf '%s'``
     # them — bash can't materialize PUA codepoints from \uXXXX itself.
