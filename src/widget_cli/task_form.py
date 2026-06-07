@@ -1,12 +1,17 @@
-"""GTK4 task creation form — single entrypoint for all task adds.
+"""GTK4 + libadwaita task creation form.
 
-Keyboard flow is the contract:
-- Title is focused on open. Hitting Enter from Title submits immediately
-  with everything else at defaults — that's the "quick capture" speed.
-- Tab cycles through optional fields in declaration order, Shift+Tab
-  goes back, Esc cancels.
-- Date / time entries accept either a picker click or direct typing
-  (YYYY-MM-DD / HH:MM) so power users never need the mouse.
+Libadwaita gives us first-class form rows (EntryRow, ComboRow,
+SpinRow, SwitchRow, ExpanderRow) and a header bar that follows the
+system Light/Dark theme without any CSS work — the surface looks at
+home next to GNOME's own dialogs.
+
+Keyboard flow contract:
+- Title is focused on open. Hitting Enter from Title submits with
+  every other field at defaults — that's the "quick capture" speed.
+- Tab cycles through the rows in declaration order, Shift+Tab goes
+  back, Esc cancels.
+- Date / time entries accept both popover picker clicks and direct
+  typing (YYYY-MM-DD / HH:MM).
 
 The form is also the calendar-popup add path: ``show(initial_date=…)``
 prefills the scheduled date so clicking a day in the calendar opens
@@ -24,7 +29,8 @@ import gi
 
 gi.require_version("Gtk", "4.0")
 gi.require_version("Gdk", "4.0")
-from gi.repository import Gdk, GLib, Gtk  # noqa: E402
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from .shared.fetcher_signal import wake_fetcher  # noqa: E402
 from .shared.format import fetch_project_map, parse_validation_error  # noqa: E402
@@ -53,7 +59,6 @@ def _fetch_projects_and_tags() -> tuple[dict[str, str], list[dict[str, Any]]]:
 
 
 def _create_tag(name: str) -> str | None:
-    """POST a new tag, return its id (or None on failure)."""
     with client() as c:
         r = c.post("/api/v1/tags", json={"name": name})
         if r.status_code in (200, 201):
@@ -62,7 +67,6 @@ def _create_tag(name: str) -> str | None:
 
 
 def _post_task(payload: dict[str, Any]) -> tuple[dict | None, str]:
-    """Return (created_task, error_message). Exactly one is truthy."""
     with client() as c:
         r = c.post("/api/v1/tasks", json=payload)
         if r.status_code in (200, 201):
@@ -70,7 +74,7 @@ def _post_task(payload: dict[str, Any]) -> tuple[dict | None, str]:
         return None, parse_validation_error(r.status_code, r.text)
 
 
-# ── Helpers ──────────────────────────────────────────────────────────────────
+# ── Parsing helpers ─────────────────────────────────────────────────────────
 
 
 def _parse_date(text: str) -> date | None:
@@ -93,86 +97,99 @@ def _parse_hhmm(text: str) -> tuple[int, int] | None:
     return None
 
 
-def _format_date(d: date | None) -> str:
-    return d.isoformat() if d else ""
+# ── Date + time expander row ────────────────────────────────────────────────
 
 
-# ── Date entry: text field + popover GtkCalendar ─────────────────────────────
+class _DateTimeRow(Adw.ExpanderRow):
+    """ExpanderRow whose subtitle shows the current selection and whose
+    expanded body is a GtkCalendar + HH:MM entry. Editing either side
+    updates the subtitle so the user can see the state without
+    re-expanding."""
+
+    def __init__(self, title: str, initial_date: date | None = None) -> None:
+        super().__init__(title=title)
+        self.set_show_enable_switch(True)
+        self.set_enable_expansion(initial_date is not None)
+        self._calendar = Gtk.Calendar()
+        if initial_date is not None:
+            self._calendar.select_day(
+                GLib.DateTime.new_local(
+                    initial_date.year, initial_date.month, initial_date.day, 0, 0, 0
+                )
+            )
+        self._calendar.set_margin_top(8)
+        self._calendar.set_margin_bottom(8)
+        self._calendar.set_margin_start(12)
+        self._calendar.set_margin_end(12)
+        self._calendar.connect("day-selected", self._on_changed)
+        self.add_row(_wrap_widget(self._calendar))
+
+        self._time_row = Adw.EntryRow(title="Time (HH:MM)")
+        self._time_row.connect("changed", self._on_changed)
+        self.add_row(self._time_row)
+
+        self.connect("notify::enable-expansion", self._on_changed)
+        self._update_subtitle()
+
+    def _on_changed(self, *_args) -> None:
+        self._update_subtitle()
+
+    def _update_subtitle(self) -> None:
+        if not self.get_enable_expansion():
+            self.set_subtitle("Off")
+            return
+        d = self.date_value()
+        t = self.time_value()
+        parts: list[str] = []
+        if d is not None:
+            parts.append(d.isoformat())
+        if t is not None:
+            parts.append(f"{t[0]:02d}:{t[1]:02d}")
+        self.set_subtitle("  ·  ".join(parts) if parts else "Off")
+
+    def date_value(self) -> date | None:
+        if not self.get_enable_expansion():
+            return None
+        dt = self._calendar.get_date()
+        return date(dt.get_year(), dt.get_month(), dt.get_day_of_month())
+
+    def time_value(self) -> tuple[int, int] | None:
+        if not self.get_enable_expansion():
+            return None
+        return _parse_hhmm(self._time_row.get_text())
 
 
-class _DateField(Gtk.Box):
-    def __init__(self, initial: date | None = None) -> None:
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=4)
-        self._entry = Gtk.Entry(placeholder_text="YYYY-MM-DD")
-        self._entry.set_hexpand(True)
-        if initial is not None:
-            self._entry.set_text(_format_date(initial))
-        self.append(self._entry)
-        pick = Gtk.MenuButton(icon_name="x-office-calendar-symbolic")
-        pop = Gtk.Popover()
-        cal = Gtk.Calendar()
-        if initial is not None:
-            cal.select_day(GLib.DateTime.new_local(initial.year, initial.month, initial.day, 0, 0, 0))
-        cal.connect("day-selected", self._on_day_selected, pop)
-        pop.set_child(cal)
-        pick.set_popover(pop)
-        self.append(pick)
-        self._cal = cal
-
-    def _on_day_selected(self, cal: Gtk.Calendar, popover: Gtk.Popover) -> None:
-        dt = cal.get_date()
-        d = date(dt.get_year(), dt.get_month(), dt.get_day_of_month())
-        self._entry.set_text(_format_date(d))
-        popover.popdown()
-
-    def value(self) -> date | None:
-        return _parse_date(self._entry.get_text())
-
-    def grab_focus(self) -> None:
-        self._entry.grab_focus()
+def _wrap_widget(child: Gtk.Widget) -> Gtk.ListBoxRow:
+    row = Gtk.ListBoxRow(activatable=False, selectable=False)
+    row.set_child(child)
+    return row
 
 
-# ── Time entry: text field "HH:MM" ───────────────────────────────────────────
+# ── Priority — linked segmented buttons in an ActionRow ──────────────────────
 
 
-class _TimeField(Gtk.Entry):
-    def __init__(self) -> None:
-        super().__init__(placeholder_text="HH:MM")
-        self.set_max_width_chars(6)
-
-    def value(self) -> tuple[int, int] | None:
-        return _parse_hhmm(self.get_text())
-
-    def iso_time(self) -> str | None:
-        v = self.value()
-        return f"{v[0]:02d}:{v[1]:02d}:00" if v else None
-
-
-# ── Priority segmented button (4 linked toggle buttons) ──────────────────────
-
-
-class _PriorityField(Gtk.Box):
-    """4-option linked segmented control (None / Low / Med / High)."""
-
+class _PriorityRow(Adw.ActionRow):
     LABELS = ["None", "Low", "Med", "High"]
     VALUES = [0, 1, 2, 3]
 
     def __init__(self) -> None:
-        super().__init__(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        self.add_css_class("linked")
+        super().__init__(title="Priority")
+        box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        box.add_css_class("linked")
+        box.set_valign(Gtk.Align.CENTER)
         self._buttons: list[Gtk.ToggleButton] = []
         group: Gtk.ToggleButton | None = None
         for label, val in zip(self.LABELS, self.VALUES):
             btn = Gtk.ToggleButton(label=label)
-            if group is not None:
-                btn.set_group(group)
-            else:
+            if group is None:
                 group = btn
+            else:
+                btn.set_group(group)
             if val == 0:
                 btn.set_active(True)
-            btn.connect("toggled", lambda *_a: None)
-            self.append(btn)
+            box.append(btn)
             self._buttons.append(btn)
+        self.add_suffix(box)
 
     def value(self) -> int:
         for btn, val in zip(self._buttons, self.VALUES):
@@ -181,22 +198,29 @@ class _PriorityField(Gtk.Box):
         return 0
 
 
-# ── Tag chips field ──────────────────────────────────────────────────────────
+# ── Tags row — chip flow + entry, gathered into an ActionRow body ────────────
 
 
-class _TagsField(Gtk.Box):
-    """Entry + chip area. Hitting Enter on the entry adds a chip; the
-    chip carries the tag id (existing tags) or the literal name
-    (new tags resolved on submit)."""
-
+class _TagsRow(Adw.PreferencesRow):
     def __init__(self, tags: list[dict[str, Any]]) -> None:
-        super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        super().__init__()
+        self.set_activatable(False)
         self._known = {t["name"].lower(): t for t in tags if "name" in t}
-        # entry + completion
-        store = Gtk.StringList.new([t["name"] for t in tags if "name" in t])
+        self._selected: list[tuple[str | None, str]] = []
+
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        outer.set_margin_top(10)
+        outer.set_margin_bottom(10)
+        outer.set_margin_start(12)
+        outer.set_margin_end(12)
+        title = Gtk.Label(label="Tags", xalign=0.0)
+        title.add_css_class("dim-label")
+        outer.append(title)
+
         self._entry = Gtk.Entry(placeholder_text="Tag name + Enter")
         self._entry.connect("activate", self._on_activate)
-        self.append(self._entry)
+        outer.append(self._entry)
+
         self._chips_box = Gtk.FlowBox(
             selection_mode=Gtk.SelectionMode.NONE,
             max_children_per_line=8,
@@ -204,10 +228,8 @@ class _TagsField(Gtk.Box):
             column_spacing=4,
             row_spacing=4,
         )
-        self.append(self._chips_box)
-        # entries of type tuple[id_or_None, name]
-        self._selected: list[tuple[str | None, str]] = []
-        _ = store  # currently unused — autocomplete added in future GTK pass
+        outer.append(self._chips_box)
+        self.set_child(outer)
 
     def _on_activate(self, _entry: Gtk.Entry) -> None:
         name = self._entry.get_text().strip()
@@ -224,7 +246,10 @@ class _TagsField(Gtk.Box):
     def _render_chip(self, name: str) -> None:
         chip = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=2)
         chip.add_css_class("pill")
-        chip.append(Gtk.Label(label=f"#{name}"))
+        chip.add_css_class("card")
+        lbl = Gtk.Label(label=f"#{name}")
+        lbl.set_margin_start(8)
+        chip.append(lbl)
         close = Gtk.Button(icon_name="window-close-symbolic")
         close.add_css_class("flat")
         close.connect("clicked", lambda _b: self._remove(name, chip))
@@ -236,8 +261,6 @@ class _TagsField(Gtk.Box):
         self._chips_box.remove(chip)
 
     def resolve_ids(self) -> list[str]:
-        """Materialise tag ids — create any chips backed by name only
-        and return the full id list."""
         out: list[str] = []
         for tid, name in self._selected:
             if tid is None:
@@ -247,131 +270,137 @@ class _TagsField(Gtk.Box):
         return out
 
 
-# ── Main window ──────────────────────────────────────────────────────────────
+# ── Description row ─────────────────────────────────────────────────────────
 
 
-class TaskForm(Gtk.ApplicationWindow):
+class _DescriptionRow(Adw.PreferencesRow):
+    def __init__(self) -> None:
+        super().__init__()
+        self.set_activatable(False)
+        outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+        outer.set_margin_top(10)
+        outer.set_margin_bottom(10)
+        outer.set_margin_start(12)
+        outer.set_margin_end(12)
+        lbl = Gtk.Label(label="Description", xalign=0.0)
+        lbl.add_css_class("dim-label")
+        outer.append(lbl)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_min_content_height(110)
+        scroll.add_css_class("card")
+        self._view = Gtk.TextView()
+        self._view.set_wrap_mode(Gtk.WrapMode.WORD)
+        self._view.set_top_margin(8)
+        self._view.set_bottom_margin(8)
+        self._view.set_left_margin(10)
+        self._view.set_right_margin(10)
+        scroll.set_child(self._view)
+        outer.append(scroll)
+        self.set_child(outer)
+
+    def value(self) -> str:
+        buf = self._view.get_buffer()
+        return buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True).strip()
+
+
+# ── Main window ─────────────────────────────────────────────────────────────
+
+
+class TaskFormWindow(Adw.ApplicationWindow):
     def __init__(
         self,
-        app: Gtk.Application,
+        app: Adw.Application,
         initial_date: date | None = None,
         on_created: Callable[[dict], None] | None = None,
     ) -> None:
         super().__init__(application=app, title="New task")
-        self.set_default_size(440, 640)
+        self.set_default_size(480, 760)
         self._on_created = on_created
 
-        outer = Gtk.ScrolledWindow()
-        outer.set_propagate_natural_height(True)
-        outer.set_min_content_height(560)
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=12)
-        box.set_margin_top(14)
-        box.set_margin_bottom(14)
-        box.set_margin_start(14)
-        box.set_margin_end(14)
-        outer.set_child(box)
-        self.set_child(outer)
+        # Top-level layout: ToastOverlay → Box (header + content scroll).
+        overlay = Adw.ToastOverlay()
+        self._overlay = overlay
+        self.set_content(overlay)
 
-        # ── Title (focused on open, Enter submits) ────────────────────
-        self._title = Gtk.Entry(placeholder_text="Title")
-        self._title.connect("activate", lambda _e: self._submit())
-        box.append(self._labeled("Title", self._title))
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        overlay.set_child(root)
 
-        # ── Project dropdown ──────────────────────────────────────────
-        self._project = Gtk.ComboBoxText()
-        self._project.append(id="", text="📥 Inbox (no project)")
-        self._project.set_active(0)
-        box.append(self._labeled("Project", self._project))
-
-        # ── Scheduled date + time ─────────────────────────────────────
-        self._sched_date = _DateField(initial=initial_date)
-        self._sched_time = _TimeField()
-        sched_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        sched_row.append(self._sched_date)
-        sched_row.append(self._sched_time)
-        box.append(self._labeled("Scheduled (date + optional time)", sched_row))
-
-        # ── Deadline date + time ──────────────────────────────────────
-        self._dl_date = _DateField()
-        self._dl_time = _TimeField()
-        dl_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        dl_row.append(self._dl_date)
-        dl_row.append(self._dl_time)
-        box.append(self._labeled("Deadline (date + optional time)", dl_row))
-
-        # ── Priority ──────────────────────────────────────────────────
-        self._priority = _PriorityField()
-        box.append(self._labeled("Priority", self._priority))
-
-        # ── Flags ─────────────────────────────────────────────────────
-        flag_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=16)
-        self._important = Gtk.CheckButton(label="★ Important")
-        self._urgent = Gtk.CheckButton(label="! Urgent")
-        flag_row.append(self._important)
-        flag_row.append(self._urgent)
-        box.append(flag_row)
-
-        # ── Tags (populated when fetch completes) ─────────────────────
-        self._tags: _TagsField | None = None
-        self._tags_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        box.append(self._labeled("Tags", self._tags_slot))
-
-        # ── Estimate ──────────────────────────────────────────────────
-        adj = Gtk.Adjustment(value=0, lower=0, upper=720, step_increment=5)
-        self._estimate = Gtk.SpinButton(adjustment=adj, digits=0)
-        self._estimate.set_numeric(True)
-        self._estimate.set_max_width_chars(6)
-        est_row = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        est_row.append(self._estimate)
-        est_row.append(Gtk.Label(label="min"))
-        box.append(self._labeled("Estimate", est_row))
-
-        # ── Description (multi-line) ─────────────────────────────────
-        self._desc = Gtk.TextView()
-        self._desc.set_wrap_mode(Gtk.WrapMode.WORD)
-        self._desc.set_size_request(-1, 100)
-        desc_scroll = Gtk.ScrolledWindow()
-        desc_scroll.set_min_content_height(100)
-        desc_scroll.set_child(self._desc)
-        box.append(self._labeled("Description", desc_scroll))
-
-        # ── Buttons ───────────────────────────────────────────────────
-        actions = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=8)
-        actions.set_halign(Gtk.Align.END)
-        self._cancel_btn = Gtk.Button(label="Cancel")
-        self._cancel_btn.connect("clicked", lambda _b: self.close())
+        header = Adw.HeaderBar()
+        header.set_show_end_title_buttons(True)
         self._add_btn = Gtk.Button(label="Add", css_classes=["suggested-action"])
         self._add_btn.connect("clicked", lambda _b: self._submit())
-        actions.append(self._cancel_btn)
-        actions.append(self._add_btn)
-        box.append(actions)
+        header.pack_end(self._add_btn)
+        root.append(header)
 
-        # Esc to cancel.
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        scroll.set_propagate_natural_height(True)
+        clamp = Adw.Clamp(maximum_size=540, tightening_threshold=480)
+        page = Adw.PreferencesPage()
+        clamp.set_child(page)
+        scroll.set_child(clamp)
+        root.append(scroll)
+
+        # ── Group: Basic ──────────────────────────────────────────
+        basic = Adw.PreferencesGroup(title="Task")
+        page.add(basic)
+        self._title = Adw.EntryRow(title="Title")
+        self._title.set_show_apply_button(False)
+        self._title.connect("entry-activated", lambda _r: self._submit())
+        basic.add(self._title)
+
+        self._project = Adw.ComboRow(title="Project")
+        self._project_store = Gtk.StringList.new(["📥 Inbox (no project)"])
+        self._project.set_model(self._project_store)
+        self._project_ids: list[str | None] = [None]
+        basic.add(self._project)
+
+        # ── Group: When ───────────────────────────────────────────
+        when = Adw.PreferencesGroup(title="When")
+        page.add(when)
+        self._sched = _DateTimeRow("Scheduled", initial_date=initial_date)
+        when.add(self._sched)
+        self._dl = _DateTimeRow("Deadline")
+        when.add(self._dl)
+
+        # ── Group: Priority & flags ──────────────────────────────
+        flags = Adw.PreferencesGroup(title="Priority & flags")
+        page.add(flags)
+        self._priority = _PriorityRow()
+        flags.add(self._priority)
+        self._important = Adw.SwitchRow(title="Important", subtitle="Eisenhower: top half")
+        flags.add(self._important)
+        self._urgent = Adw.SwitchRow(title="Urgent", subtitle="Eisenhower: right half")
+        flags.add(self._urgent)
+
+        # ── Group: Tags ──────────────────────────────────────────
+        self._tags_group = Adw.PreferencesGroup(title="Tags")
+        page.add(self._tags_group)
+        self._tags_row: _TagsRow | None = None
+
+        # ── Group: Other ─────────────────────────────────────────
+        other = Adw.PreferencesGroup(title="Other")
+        page.add(other)
+        adj = Gtk.Adjustment(value=0, lower=0, upper=720, step_increment=5)
+        self._estimate = Adw.SpinRow(title="Estimate (min)", adjustment=adj, digits=0)
+        other.add(self._estimate)
+
+        self._description = _DescriptionRow()
+        other.add(self._description)
+
+        # ── Wiring ────────────────────────────────────────────────
         key = Gtk.EventControllerKey()
         key.connect("key-pressed", self._on_key)
         self.add_controller(key)
 
-        self._title.grab_focus()
+        # ``select_region`` works around the row's default behavior of
+        # not auto-focusing the inner entry; we force focus on the inner
+        # editable so typing starts immediately.
+        GLib.idle_add(self._title.grab_focus)
         self._load_dropdowns()
 
-    # ── helpers ────────────────────────────────────────────────────────
-
-    @staticmethod
-    def _labeled(label: str, child: Gtk.Widget) -> Gtk.Box:
-        b = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        lbl = Gtk.Label(xalign=0.0, label=label)
-        lbl.add_css_class("dim-label")
-        b.append(lbl)
-        b.append(child)
-        return b
-
-    def _on_key(self, _ctrl, keyval, _kc, _mods) -> bool:
-        if keyval == Gdk.KEY_Escape:
-            self.close()
-            return True
-        return False
-
-    # ── Async data load ────────────────────────────────────────────────
+    # ── Async loading ──────────────────────────────────────────────
 
     def _load_dropdowns(self) -> None:
         def worker() -> None:
@@ -380,54 +409,55 @@ class TaskForm(Gtk.ApplicationWindow):
             except Exception as e:  # noqa: BLE001
                 GLib.idle_add(toast, "Load failed", str(e), True)
                 return
-            GLib.idle_add(self._populate_dropdowns, projects, tags)
+            GLib.idle_add(self._populate, projects, tags)
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _populate_dropdowns(
+    def _populate(
         self, projects: dict[str, str], tags: list[dict[str, Any]]
     ) -> bool:
         for pid, pname in sorted(projects.items(), key=lambda kv: kv[1].lower()):
-            self._project.append(id=pid, text=f"#{pname}")
-        self._tags = _TagsField(tags)
-        self._tags_slot.append(self._tags)
+            self._project_store.append(f"#{pname}")
+            self._project_ids.append(pid)
+        self._tags_row = _TagsRow(tags)
+        self._tags_group.add(self._tags_row)
         return False
 
-    # ── Submit ─────────────────────────────────────────────────────────
+    # ── Submit / payload ───────────────────────────────────────────
 
     def _build_payload(self) -> tuple[dict[str, Any] | None, str]:
-        """Validate and assemble. Returns (payload, error_message)."""
         title = self._title.get_text().strip()
         if not title:
             return None, "Title is required."
         payload: dict[str, Any] = {"title": title}
 
-        pid = self._project.get_active_id()
-        if pid:
-            payload["project_id"] = pid
+        idx = self._project.get_selected()
+        if 0 <= idx < len(self._project_ids):
+            pid = self._project_ids[idx]
+            if pid:
+                payload["project_id"] = pid
 
-        sched_d = self._sched_date.value()
-        sched_t = self._sched_time.iso_time()
+        sched_d = self._sched.date_value()
+        sched_t = self._sched.time_value()
         if sched_t and not sched_d:
-            return None, "Scheduled time set but no scheduled date."
+            return None, "Scheduled time set without a scheduled date."
         if sched_d:
             payload["scheduled_date"] = sched_d.isoformat()
         if sched_t:
-            payload["fixed_start_time"] = sched_t
+            payload["fixed_start_time"] = f"{sched_t[0]:02d}:{sched_t[1]:02d}:00"
 
-        dl_d = self._dl_date.value()
-        dl_t = self._dl_time.value()
+        dl_d = self._dl.date_value()
+        dl_t = self._dl.time_value()
         if dl_d:
             h, m = dl_t if dl_t else (23, 59)
-            # Local time → UTC ISO 8601. The backend stores TIMESTAMPTZ.
             local = datetime(dl_d.year, dl_d.month, dl_d.day, h, m)
             payload["deadline"] = (
                 local.astimezone(UTC).isoformat().replace("+00:00", "Z")
             )
 
-        prio = self._priority.value()
-        if prio > 0:
-            payload["priority"] = prio
+        pri = self._priority.value()
+        if pri > 0:
+            payload["priority"] = pri
         if self._important.get_active():
             payload["is_important"] = True
         if self._urgent.get_active():
@@ -437,8 +467,7 @@ class TaskForm(Gtk.ApplicationWindow):
         if est > 0:
             payload["estimated_minutes"] = est
 
-        buf = self._desc.get_buffer()
-        desc = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True).strip()
+        desc = self._description.value()
         if desc:
             payload["description"] = desc
 
@@ -447,18 +476,15 @@ class TaskForm(Gtk.ApplicationWindow):
     def _submit(self) -> None:
         payload, err = self._build_payload()
         if err:
-            toast("Add failed", err, urgent=True)
+            self._show_toast(err)
             return
         assert payload is not None
-        # Tag id materialisation can hit the network — keep it off the
-        # GTK main loop so the form stays responsive while creating
-        # new tags.
-        tags_field = self._tags
+        tags_row = self._tags_row
 
         def worker() -> None:
             try:
-                if tags_field is not None:
-                    tag_ids = tags_field.resolve_ids()
+                if tags_row is not None:
+                    tag_ids = tags_row.resolve_ids()
                     if tag_ids:
                         payload["tag_ids"] = tag_ids
                 created, err = _post_task(payload)
@@ -483,14 +509,25 @@ class TaskForm(Gtk.ApplicationWindow):
 
     def _on_failed(self, err: str) -> bool:
         self._add_btn.set_sensitive(True)
-        toast("Add failed", err, urgent=True)
+        self._show_toast(err)
+        return False
+
+    def _show_toast(self, body: str) -> None:
+        t = Adw.Toast.new(body)
+        t.set_timeout(4)
+        self._overlay.add_toast(t)
+
+    def _on_key(self, _ctrl, keyval, _kc, _mods) -> bool:
+        if keyval == Gdk.KEY_Escape:
+            self.close()
+            return True
         return False
 
 
-# ── Application entrypoint ───────────────────────────────────────────────────
+# ── App entrypoint ──────────────────────────────────────────────────────────
 
 
-class _FormApp(Gtk.Application):
+class _FormApp(Adw.Application):
     def __init__(
         self,
         initial_date: date | None = None,
@@ -501,7 +538,7 @@ class _FormApp(Gtk.Application):
         self._on_created = on_created
 
     def do_activate(self) -> None:
-        win = TaskForm(
+        win = TaskFormWindow(
             self, initial_date=self._initial_date, on_created=self._on_created
         )
         win.present()
@@ -511,7 +548,5 @@ def show(
     initial_date: date | None = None,
     on_created: Callable[[dict], None] | None = None,
 ) -> int:
-    """Open the form and block until the window closes. Used both as
-    a CLI subcommand entrypoint and from the calendar popup."""
     app = _FormApp(initial_date=initial_date, on_created=on_created)
     return app.run(None) or 0

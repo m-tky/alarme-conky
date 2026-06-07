@@ -1,14 +1,14 @@
-"""On-demand calendar popup — GTK4 dialog.
+"""GTK4 + libadwaita calendar popup.
 
-Shows a month grid with busy days marked, click a day to see/add that
-day's tasks. Inline add: title field + project picker + Add button
-inside the popup itself so the flow stays in one window.
+Shows a month grid with busy days marked, click a day to see the
+tasks scheduled / deadlined that day. "Add task for this day" opens
+the unified TaskForm prefilled with the selected date, so users see
+the same surface no matter which entry point they choose.
 """
 
 from __future__ import annotations
 
 import argparse
-import calendar as calendar_mod
 import threading
 from datetime import date
 from typing import Any
@@ -16,17 +16,18 @@ from typing import Any
 import gi
 
 gi.require_version("Gtk", "4.0")
-from gi.repository import GLib, Gtk  # noqa: E402
+gi.require_version("Gdk", "4.0")
+gi.require_version("Adw", "1")
+from gi.repository import Adw, Gdk, GLib, Gtk  # noqa: E402
 
 from . import task_form  # noqa: E402
-from .shared.format import fetch_project_map  # noqa: E402
 from .shared.fetcher_signal import wake_fetcher  # noqa: E402
+from .shared.format import fetch_project_map  # noqa: E402
 from .shared.http import client  # noqa: E402
 from .shared.notify import toast  # noqa: E402
 
 
 def _fetch_open_tasks() -> list[dict[str, Any]]:
-    """Pull every open task — the popup only ever filters client-side."""
     out: list[dict[str, Any]] = []
     with client() as c:
         for status in ("not_yet", "doing"):
@@ -45,7 +46,6 @@ def _fetch_projects() -> dict[str, str]:
 
 
 def _filter_tasks_for_day(tasks: list[dict[str, Any]], d: date) -> list[dict[str, Any]]:
-    """Match either scheduled_date == d or deadline's date-part == d."""
     iso = d.isoformat()
     out: list[dict[str, Any]] = []
     for t in tasks:
@@ -59,38 +59,16 @@ def _filter_tasks_for_day(tasks: list[dict[str, Any]], d: date) -> list[dict[str
     return out
 
 
-# ── Badge rendering for day-detail rows ──────────────────────────────────────
-
-
 _PRI_BADGE = {1: "L", 2: "M", 3: "H"}
 
 
-def _task_row_text(t: dict[str, Any], project_name: str | None) -> str:
-    parts: list[str] = []
-    time_part = (t.get("fixed_start_time") or "")[:5]
-    if time_part:
-        parts.append(time_part)
-    parts.append(t.get("title") or "(no title)")
-    if project_name:
-        parts.append(f"#{project_name}")
-    pri = int(t.get("priority") or 0)
-    if pri in _PRI_BADGE:
-        parts.append(f"[{_PRI_BADGE[pri]}]")
-    if t.get("is_important"):
-        parts.append("★")
-    if t.get("is_urgent"):
-        parts.append("!")
-    return "  ".join(parts)
+# ── Window ────────────────────────────────────────────────────────────────
 
 
-# ── GTK window ───────────────────────────────────────────────────────────────
-
-
-class CalendarWindow(Gtk.ApplicationWindow):
-    def __init__(self, app: Gtk.Application) -> None:
+class CalendarWindow(Adw.ApplicationWindow):
+    def __init__(self, app: Adw.Application) -> None:
         super().__init__(application=app, title="Calendar")
-        self.set_default_size(380, 600)
-        self.set_resizable(False)
+        self.set_default_size(420, 640)
 
         today = date.today()
         self._selected: date = today
@@ -99,53 +77,67 @@ class CalendarWindow(Gtk.ApplicationWindow):
         self._current_year = today.year
         self._current_month = today.month
 
-        box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
-        box.set_margin_top(12)
-        box.set_margin_bottom(12)
-        box.set_margin_start(12)
-        box.set_margin_end(12)
-        self.set_child(box)
+        overlay = Adw.ToastOverlay()
+        self._overlay = overlay
+        self.set_content(overlay)
 
-        # ── Month grid ────────────────────────────────────────────────
+        root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        overlay.set_child(root)
+
+        header = Adw.HeaderBar()
+        root.append(header)
+
+        scroll = Gtk.ScrolledWindow()
+        scroll.set_vexpand(True)
+        clamp = Adw.Clamp(maximum_size=460, tightening_threshold=420)
+        page = Adw.PreferencesPage()
+        clamp.set_child(page)
+        scroll.set_child(clamp)
+        root.append(scroll)
+
+        # ── Group: Month grid ────────────────────────────────────────
+        grid_group = Adw.PreferencesGroup()
+        page.add(grid_group)
+        cal_row = Adw.PreferencesRow()
+        cal_row.set_activatable(False)
+        cal_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        cal_box.set_margin_top(8)
+        cal_box.set_margin_bottom(8)
+        cal_box.set_margin_start(8)
+        cal_box.set_margin_end(8)
         self._calendar = Gtk.Calendar()
         self._calendar.connect("day-selected", self._on_day_selected)
         self._calendar.connect("next-month", self._on_month_changed)
         self._calendar.connect("prev-month", self._on_month_changed)
         self._calendar.connect("next-year", self._on_month_changed)
         self._calendar.connect("prev-year", self._on_month_changed)
-        box.append(self._calendar)
+        cal_box.append(self._calendar)
+        cal_row.set_child(cal_box)
+        grid_group.add(cal_row)
 
-        # ── Day detail header ─────────────────────────────────────────
-        self._detail_header = Gtk.Label(xalign=0.0)
-        self._detail_header.add_css_class("title-3")
-        box.append(self._detail_header)
+        # ── Group: Day detail ────────────────────────────────────────
+        self._detail_group = Adw.PreferencesGroup()
+        page.add(self._detail_group)
+        self._refresh_detail_group_header()
 
-        # ── Scrollable task list ──────────────────────────────────────
-        scroller = Gtk.ScrolledWindow(vexpand=True)
-        self._list_box = Gtk.ListBox()
-        self._list_box.set_selection_mode(Gtk.SelectionMode.NONE)
-        scroller.set_child(self._list_box)
-        box.append(scroller)
+        # ── Add button ───────────────────────────────────────────────
+        add_group = Adw.PreferencesGroup()
+        page.add(add_group)
+        add_row = Adw.ActionRow(title="+ Add task for this day")
+        add_row.set_activatable(True)
+        add_row.connect("activated", lambda _r: self._on_add_clicked())
+        # Make the row look like a primary action.
+        add_row.add_css_class("accent")
+        add_group.add(add_row)
+        self._add_row = add_row
 
-        # ── Add button — opens the unified task form prefilled with
-        # the currently selected day. We hand off rather than rolling
-        # an inline form so users get exactly the same UX no matter
-        # which entry point they use (Mod+Alt+T or this popup).
-        self._add_btn = Gtk.Button(
-            label="+ Add task for this day",
-            css_classes=["suggested-action"],
-        )
-        self._add_btn.connect("clicked", self._on_add_clicked)
-        box.append(self._add_btn)
-
-        # Escape closes — behave like a transient menu.
         key = Gtk.EventControllerKey()
-        key.connect("key-pressed", self._on_key_pressed)
+        key.connect("key-pressed", self._on_key)
         self.add_controller(key)
 
         self._kick_off_load()
 
-    # ── data loading ───────────────────────────────────────────────────
+    # ── data ───────────────────────────────────────────────────────────
 
     def _kick_off_load(self) -> None:
         def worker() -> None:
@@ -159,7 +151,9 @@ class CalendarWindow(Gtk.ApplicationWindow):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _on_load_done(self, tasks: list[dict[str, Any]], projects: dict[str, str]) -> bool:
+    def _on_load_done(
+        self, tasks: list[dict[str, Any]], projects: dict[str, str]
+    ) -> bool:
         self._tasks = tasks
         self._projects = projects
         self._refresh_marks()
@@ -174,8 +168,6 @@ class CalendarWindow(Gtk.ApplicationWindow):
 
     def _refresh_marks(self) -> None:
         self._calendar.clear_marks()
-        target_y = self._current_year
-        target_m = self._current_month
         for t in self._tasks:
             for key in ("scheduled_date", "deadline"):
                 v = t.get(key)
@@ -185,52 +177,59 @@ class CalendarWindow(Gtk.ApplicationWindow):
                     d = date.fromisoformat(v[:10])
                 except ValueError:
                     continue
-                if d.year == target_y and d.month == target_m:
+                if (
+                    d.year == self._current_year
+                    and d.month == self._current_month
+                ):
                     self._calendar.mark_day(d.day)
 
-    # ── detail pane ────────────────────────────────────────────────────
+    # ── detail ─────────────────────────────────────────────────────────
+
+    def _refresh_detail_group_header(self) -> None:
+        self._detail_group.set_title(self._selected.isoformat())
 
     def _refresh_detail(self) -> None:
-        self._detail_header.set_text(self._selected.isoformat())
-        while (row := self._list_box.get_first_child()) is not None:
-            self._list_box.remove(row)
+        self._refresh_detail_group_header()
+        # Adw.PreferencesGroup doesn't expose row removal; we wipe via
+        # its internal Gtk.ListBox if accessible. Simplest path: track
+        # rows we added and remove them by reference.
+        for row in getattr(self, "_detail_rows", []):
+            self._detail_group.remove(row)
+        self._detail_rows: list[Gtk.Widget] = []
+
         items = _filter_tasks_for_day(self._tasks, self._selected)
         if not items:
-            label = Gtk.Label(label="(nothing scheduled)", xalign=0.0)
-            label.add_css_class("dim-label")
-            label.set_margin_top(6)
-            label.set_margin_bottom(6)
-            label.set_margin_start(6)
-            row = Gtk.ListBoxRow()
-            row.set_child(label)
-            self._list_box.append(row)
+            row = Adw.ActionRow(
+                title="(nothing scheduled)",
+                css_classes=["dim-label"],
+            )
+            self._detail_group.add(row)
+            self._detail_rows.append(row)
             return
         for t in items:
-            row = Gtk.ListBoxRow()
-            label = Gtk.Label(xalign=0.0, wrap=True)
-            label.set_text(
-                _task_row_text(t, project_name=self._projects.get(t.get("project_id")))
+            title = t.get("title") or "(no title)"
+            subtitle_parts: list[str] = []
+            time_part = (t.get("fixed_start_time") or "")[:5]
+            if time_part:
+                subtitle_parts.append(time_part)
+            pname = self._projects.get(t.get("project_id"))
+            if pname:
+                subtitle_parts.append(f"#{pname}")
+            pri = int(t.get("priority") or 0)
+            if pri in _PRI_BADGE:
+                subtitle_parts.append(f"[{_PRI_BADGE[pri]}]")
+            if t.get("is_important"):
+                subtitle_parts.append("★")
+            if t.get("is_urgent"):
+                subtitle_parts.append("!")
+            row = Adw.ActionRow(
+                title=title,
+                subtitle="  ·  ".join(subtitle_parts) if subtitle_parts else None,
             )
-            label.set_margin_top(4)
-            label.set_margin_bottom(4)
-            label.set_margin_start(6)
-            label.set_margin_end(6)
-            row.set_child(label)
-            self._list_box.append(row)
+            self._detail_group.add(row)
+            self._detail_rows.append(row)
 
-    # ── inline add ─────────────────────────────────────────────────────
-
-    def _on_add_clicked(self, _w) -> None:
-        # Re-pull the day list after the form closes so the new task
-        # shows up immediately, but only if the user actually created
-        # one. The form notifies us via the on_created callback.
-        def on_created(_created: dict) -> None:
-            wake_fetcher()
-            GLib.idle_add(self._kick_off_load)
-
-        task_form.show(initial_date=self._selected, on_created=on_created)
-
-    # ── signal handlers ────────────────────────────────────────────────
+    # ── handlers ───────────────────────────────────────────────────────
 
     def _selected_from_calendar(self) -> date:
         dt = self._calendar.get_date()
@@ -246,23 +245,30 @@ class CalendarWindow(Gtk.ApplicationWindow):
         self._current_month = sel.month
         self._kick_off_load()
 
-    def _on_key_pressed(self, _ctrl, keyval, _keycode, _mods) -> bool:
-        from gi.repository import Gdk
+    def _on_add_clicked(self) -> None:
+        def on_created(_created: dict) -> None:
+            wake_fetcher()
+            GLib.idle_add(self._kick_off_load)
 
+        task_form.show(initial_date=self._selected, on_created=on_created)
+
+    def _on_key(self, _ctrl, keyval, _kc, _mods) -> bool:
         if keyval == Gdk.KEY_Escape:
             self.close()
             return True
         return False
 
 
-class CalendarApp(Gtk.Application):
+# ── App entry ──────────────────────────────────────────────────────────────
+
+
+class CalendarApp(Adw.Application):
     def __init__(self) -> None:
         super().__init__(application_id="org.wayland-conky.Calendar")
 
     def do_activate(self) -> None:
         win = CalendarWindow(self)
         win.present()
-        _ = calendar_mod  # silence unused-import linter
 
 
 def main(_args: argparse.Namespace) -> int:

@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
-# Error line — already silent on success. No header glyph, just the
-# alert-colored message, because the toast (notify-send) already gave
-# the user the loud version.
+# Error — alert-coloured one-liner with the Nerd Font warning glyph.
 set -eu
 err=$("$JQ" -r '.meta.last_error // ""' "$STATE_FILE" 2>/dev/null)
 if [ -n "$err" ]; then
-  printf '${color #%s}⚠ %s${color}\n' "$COLOR_ALERT" "$err"
+  printf '${color #%s}${font %s}%s${font %s} %s${color}\n' \
+    "$COLOR_ALERT" "$NF_FONT" "$GLYPH_WARN" "$MAIN_FONT" "$err"
 fi

@@ -296,7 +296,10 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
 
     # ── Habits today ──────────────────────────────────────────────────────
     # /habits/today returns HabitOut rows whose `logs` array is exactly
-    # today's logs for that habit; non-empty + count > 0 ⇒ checked.
+    # today's logs for that habit. We surface count + target_count to
+    # the panel so multi-count goals (target_count > 1, e.g. "drink
+    # water 3 times") can render as progress bars rather than a
+    # single-tick boolean.
     habits_today: list[dict[str, Any]] = []
     if not isinstance(habits_raw, Exception):
         items = habits_raw if isinstance(habits_raw, list) else habits_raw.get("items", [])
@@ -304,8 +307,16 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
             if not isinstance(h, dict):
                 continue
             logs = h.get("logs") or []
-            done = any(isinstance(l, dict) and (l.get("count") or 0) > 0 for l in logs)
-            habits_today.append({"name": h.get("name", "")[:12], "done": done})
+            count = sum(int(l.get("count") or 0) for l in logs if isinstance(l, dict))
+            target = int(h.get("target_count") or 1)
+            habits_today.append(
+                {
+                    "name": h.get("name", "")[:12],
+                    "done": count > 0,
+                    "count": count,
+                    "target_count": target,
+                }
+            )
 
     # ── Pomodoro current ──────────────────────────────────────────────────
     # No dedicated "active session" endpoint; the recent-sessions list is
@@ -324,11 +335,16 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
                 )
                 # Backend's `duration` is in minutes.
                 duration_s = int(sess.get("duration") or 25) * 60
-                remaining = duration_s - int((now - started).total_seconds())
+                elapsed_s = int((now - started).total_seconds())
+                remaining = duration_s - elapsed_s
                 if remaining > 0:
                     pomodoro = {
                         "task_title": "Focus",
                         "remaining": f"{remaining // 60:02d}:{remaining % 60:02d}",
+                        # Ratio 0.0–1.0 for the progress bar in pomo.sh.
+                        "elapsed_ratio": round(
+                            max(0.0, min(1.0, elapsed_s / duration_s)), 3
+                        ),
                     }
                     break
             except (ValueError, KeyError, TypeError):

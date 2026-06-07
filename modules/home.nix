@@ -63,6 +63,39 @@ let
   # env-prelude that injects colour hexes, the state-file path, and the jq
   # binary. The wrapper itself stays trivial so the writeShellScript indented
   # string doesn't need any escape tricks.
+  # Nerd Font used for icon glyphs only. The main UI font (Moralerspace
+  # Argon by default) doesn't ship Font-Awesome / Material icons, so we
+  # ${font}-switch into a Nerd Font around each glyph and back to the
+  # main font afterwards.
+  nfFont = "FiraCode Nerd Font Mono:size=10";
+  bigFont = "Moralerspace Argon:size=18";
+
+  # Nerd Font glyphs by name. We materialize each from its codepoint via
+  # builtins.fromJSON because typing the raw PUA character into a Nix
+  # string is fragile (editors, terminals, paste buffers all eat them).
+  # Codepoints are stable Font Awesome positions shipped by every major
+  # Nerd Font.
+  fromCp = cp: builtins.fromJSON ''"\u${cp}"'';
+  glyph = {
+    bolt      = fromCp "F0E7";  # app icon — energetic / "alarme"
+    bell      = fromCp "F0F3";  # overdue
+    clock     = fromCp "F017";  # today
+    calWeek   = fromCp "F073";  # week / calendar
+    today     = fromCp "F017";  # today block (same as `clock`)
+    check     = fromCp "F058";  # done today
+    inbox     = fromCp "F01C";  # inbox
+    fire      = fromCp "F06D";  # habits
+    stopwatch = fromCp "F2F2";  # pomodoro — user prefers this over 🍅
+    note      = fromCp "F0F6";  # notes
+    warning   = fromCp "F071";  # error
+    refresh   = fromCp "F021";  # age badge (replaces ⟳)
+  };
+  # Small helper: switch into NF font, print glyph, switch back to main.
+  # Conky's ``${font}`` with no argument restores the default font set
+  # on the conky.config block, so ``${font}<glyph>${font}`` would be
+  # wrong — we explicitly switch back to the main font.
+  ico = g: "\${font ${nfFont}}${g}\${font ${cfg.font}}";
+
   mkBlock = name: pkgs.writeShellScript "wc-${name}" ''
     export STATE_FILE='${stateFile}'
     export JQ='${pkgs.jq}/bin/jq'
@@ -71,6 +104,17 @@ let
     export COLOR_ALERT='${colors.alert}'
     export COLOR_ACCENT='${colors.accent}'
     export COLOR_SECTION='${colors.section}'
+    export COLOR_MUTED='${colors.muted}'
+    export NF_FONT='${nfFont}'
+    export MAIN_FONT='${cfg.font}'
+    # Glyphs are exported as raw UTF-8 so scripts can ``printf '%s'``
+    # them — bash can't materialize PUA codepoints from \uXXXX itself.
+    export GLYPH_CHECK='${glyph.check}'
+    export GLYPH_INBOX='${glyph.inbox}'
+    export GLYPH_NOTE='${glyph.note}'
+    export GLYPH_WARN='${glyph.warning}'
+    export GLYPH_STOPWATCH='${glyph.stopwatch}'
+    export GLYPH_REFRESH='${glyph.refresh}'
     exec ${pkgs.bash}/bin/bash ${../src/conky/scripts}/${name}.sh "$@"
   '';
 
@@ -128,23 +172,23 @@ let
     };
 
     conky.text = [[
-    ''${color1}TASK''${color}   ''${execpi 5 ${ageScript}}
-    ''${color7}────────────────────────────''${color}
+    ''${color1}${ico glyph.bolt} Alarme''${color}  ''${execpi 5 ${ageScript}}
+    ''${voffset 4}''${color7}─────────────────────────────''${color}
 
-    ''${color2}''${execi 5 ${counterScript} overdue}''${color}  Overdue
-    ''${color2}''${execi 5 ${counterScript} today}''${color}  Today
-    ''${color2}''${execi 5 ${counterScript} this_week}''${color}  This week
+    ''${voffset 4}''${color2}${ico glyph.bell}  ''${font ${bigFont}}''${execi 5 ${counterScript} overdue}''${font ${cfg.font}}  ''${color6}Overdue''${color}
+    ''${color2}${ico glyph.clock}  ''${font ${bigFont}}''${execi 5 ${counterScript} today}''${font ${cfg.font}}  ''${color6}Today''${color}
+    ''${color2}${ico glyph.calWeek}  ''${font ${bigFont}}''${execi 5 ${counterScript} this_week}''${font ${cfg.font}}  ''${color6}This week''${color}
 
-    ''${color1}── Today ──────────────''${color}
+    ''${voffset 6}''${color1}${ico glyph.today} Today''${color}
     ''${execi 5 ${todayScript}}
     ''${execpi 30 ${doneTodayScript}}
     ''${execpi 30 ${inboxScript}}
 
-    ''${color1}── Habits ─────────────''${color}
-    ''${execi 30 ${habitsScript}}
+    ''${voffset 6}''${color1}${ico glyph.fire} Habits''${color}
+    ''${execpi 30 ${habitsScript}}
     ''${execpi 1 ${pomoScript}}
 
-    ''${color1}── Calendar ───────────''${color}
+    ''${voffset 6}''${color1}${ico glyph.calWeek} Calendar''${color}
     ''${execpi 30 ${calScript}}
     ''${execpi 30 ${notesScript}}
     ''${execpi 5 ${errScript}}

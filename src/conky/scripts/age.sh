@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Print the freshness badge: green < 60s, yellow < 5m, red ≥ 5m.
-# Reads ageEnv injected via systemd / parent script (STATE_FILE, JQ, COLOR_OK,
-# COLOR_HIGHLIGHT, COLOR_ALERT). These come from the home.nix wrapper which
-# substitutes Nix values into a tiny env-prelude.
+# Freshness badge: green < 60s, yellow < 5m, red ≥ 5m. Uses the Nerd
+# Font refresh glyph (Font Awesome's "refresh") for visual consistency
+# with the other section icons.
 set -eu
 file="${STATE_FILE:?STATE_FILE not set}"
 jq_bin="${JQ:?JQ not set}"
@@ -14,4 +13,5 @@ if   [ "$diff" -lt 60 ];  then col="$COLOR_OK";        label="${diff}s ago"
 elif [ "$diff" -lt 300 ]; then col="$COLOR_HIGHLIGHT"; label="$((diff/60))m ago"
 else                           col="$COLOR_ALERT";    label="$((diff/60))m ago"
 fi
-printf '${color #%s}⟳ %s' "$col" "$label"
+printf '${color #%s}${font %s}%s${font %s} %s${color}' \
+  "$col" "$NF_FONT" "$GLYPH_REFRESH" "$MAIN_FONT" "$label"
