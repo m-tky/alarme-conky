@@ -441,6 +441,16 @@ in
       Service = {
         Type = "simple";
         ExecStart = "${flakePkgs.widget-cli}/bin/task-widget pomo-overlay";
+        # gtk4-layer-shell ships a libwayland-client interposer that
+        # MUST be in the link order before libwayland-client, otherwise
+        # gtk_layer_init_for_window() refuses to convert the surface
+        # and we get a regular top-level window instead of a layer
+        # surface. LD_PRELOAD is the recommended runtime fix when you
+        # can't control the link order; only the overlay service gets
+        # it, so other widget-cli subcommands stay unaffected.
+        Environment = [
+          "LD_PRELOAD=${pkgs.gtk4-layer-shell}/lib/libgtk4-layer-shell.so"
+        ];
         Restart = "on-failure";
         RestartSec = 5;
       };
