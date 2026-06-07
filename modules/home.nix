@@ -328,10 +328,11 @@ in
 
     # ── niri keybinds (Mod+Alt+ namespace) ────────────────────────────────
     programs.niri.settings.binds = lib.mkIf cfg.niri.installKeybinds {
+      # Mod+Alt+T opens the unified GTK4 task form. Title is focused
+      # and Enter submits, so quick capture and rich edit share one
+      # entry point — no separate "guided" mode.
       "Mod+Alt+T".action.spawn =
         [ "${flakePkgs.widget-cli}/bin/task-widget" "add" ];
-      "Mod+Alt+Shift+T".action.spawn =
-        [ "${flakePkgs.widget-cli}/bin/task-widget" "add" "--guided" ];
       "Mod+Alt+D".action.spawn =
         [ "${flakePkgs.widget-cli}/bin/task-widget" "done" ];
       "Mod+Alt+S".action.spawn =

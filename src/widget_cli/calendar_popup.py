@@ -18,7 +18,8 @@ import gi
 gi.require_version("Gtk", "4.0")
 from gi.repository import GLib, Gtk  # noqa: E402
 
-from .shared.format import fetch_project_map, parse_validation_error  # noqa: E402
+from . import task_form  # noqa: E402
+from .shared.format import fetch_project_map  # noqa: E402
 from .shared.fetcher_signal import wake_fetcher  # noqa: E402
 from .shared.http import client  # noqa: E402
 from .shared.notify import toast  # noqa: E402
@@ -56,14 +57,6 @@ def _filter_tasks_for_day(tasks: list[dict[str, Any]], d: date) -> list[dict[str
             out.append(t)
     out.sort(key=lambda x: x.get("fixed_start_time") or "ZZ")
     return out
-
-
-def _post_task(payload: dict[str, Any]) -> tuple[bool, str]:
-    with client() as c:
-        r = c.post("/api/v1/tasks", json=payload)
-        if r.status_code in (200, 201):
-            return True, ""
-        return False, parse_validation_error(r.status_code, r.text)
 
 
 # ── Badge rendering for day-detail rows ──────────────────────────────────────
@@ -134,23 +127,16 @@ class CalendarWindow(Gtk.ApplicationWindow):
         scroller.set_child(self._list_box)
         box.append(scroller)
 
-        # ── Inline add row: title entry + project dropdown + button ──
-        add_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=6)
-        self._title_entry = Gtk.Entry()
-        self._title_entry.set_placeholder_text("New task title…")
-        self._title_entry.set_hexpand(True)
-        # Pressing Enter inside the entry triggers the add too.
-        self._title_entry.connect("activate", self._on_add_clicked)
-        add_box.append(self._title_entry)
-
-        self._project_combo = Gtk.ComboBoxText()
-        self._project_combo.append(id="", text="📥 Inbox")
-        add_box.append(self._project_combo)
-
-        self._add_btn = Gtk.Button(label="Add")
+        # ── Add button — opens the unified task form prefilled with
+        # the currently selected day. We hand off rather than rolling
+        # an inline form so users get exactly the same UX no matter
+        # which entry point they use (Mod+Alt+T or this popup).
+        self._add_btn = Gtk.Button(
+            label="+ Add task for this day",
+            css_classes=["suggested-action"],
+        )
         self._add_btn.connect("clicked", self._on_add_clicked)
-        add_box.append(self._add_btn)
-        box.append(add_box)
+        box.append(self._add_btn)
 
         # Escape closes — behave like a transient menu.
         key = Gtk.EventControllerKey()
@@ -176,12 +162,6 @@ class CalendarWindow(Gtk.ApplicationWindow):
     def _on_load_done(self, tasks: list[dict[str, Any]], projects: dict[str, str]) -> bool:
         self._tasks = tasks
         self._projects = projects
-        # Re-populate the project dropdown only the first time around so
-        # navigating months doesn't reset the user's chosen project.
-        if self._project_combo.get_active() < 0:
-            self._project_combo.set_active(0)
-            for pid, pname in sorted(projects.items(), key=lambda kv: kv[1].lower()):
-                self._project_combo.append(id=pid, text=f"#{pname}")
         self._refresh_marks()
         self._refresh_detail()
         return False
@@ -241,41 +221,14 @@ class CalendarWindow(Gtk.ApplicationWindow):
     # ── inline add ─────────────────────────────────────────────────────
 
     def _on_add_clicked(self, _w) -> None:
-        title = self._title_entry.get_text().strip()
-        if not title:
-            return
-        project_id = self._project_combo.get_active_id() or None
-        payload: dict[str, Any] = {
-            "title": title,
-            "scheduled_date": self._selected.isoformat(),
-        }
-        if project_id:
-            payload["project_id"] = project_id
+        # Re-pull the day list after the form closes so the new task
+        # shows up immediately, but only if the user actually created
+        # one. The form notifies us via the on_created callback.
+        def on_created(_created: dict) -> None:
+            wake_fetcher()
+            GLib.idle_add(self._kick_off_load)
 
-        def worker() -> None:
-            ok, err = _post_task(payload)
-            if not ok:
-                GLib.idle_add(self._on_add_failed, err)
-                return
-            GLib.idle_add(self._on_add_done, title)
-
-        # Lock the button so double-click doesn't double-submit.
-        self._add_btn.set_sensitive(False)
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _on_add_done(self, title: str) -> bool:
-        self._title_entry.set_text("")
-        self._add_btn.set_sensitive(True)
-        toast("Task added", f"{title}  ·  {self._selected.isoformat()}")
-        wake_fetcher()
-        # Re-pull so the just-added task appears in the day list.
-        self._kick_off_load()
-        return False
-
-    def _on_add_failed(self, err: str) -> bool:
-        self._add_btn.set_sensitive(True)
-        toast("Add failed", err, urgent=True)
-        return False
+        task_form.show(initial_date=self._selected, on_created=on_created)
 
     # ── signal handlers ────────────────────────────────────────────────
 

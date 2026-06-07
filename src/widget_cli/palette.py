@@ -66,25 +66,23 @@ def main(_args: argparse.Namespace) -> int:
         return (label, (key, payload))
 
     choices = [
-        row("➕", "Add task",          "add",        False),
-        row("➕", "Add task (guided)", "add_g",      True),
-        row("✓",  "Mark done",         "done",       None),
-        row("✗",  "Delete task",       "delete",     None),
-        row("⏰", "Snooze",             "snooze",     None),
-        row("🍅", "Pomodoro",           "pomo",       None),
-        row("✔",  "Habit check",       "habit",      None),
-        row("🔍", "Jump to task",      "jump",       None),
-        row("📅", "Calendar",          "cal",        None),
-        row("🪟", "Toggle conky",      "toggle",     None),
+        row("➕", "Add task",     "add",    None),
+        row("✓",  "Mark done",    "done",   None),
+        row("✗",  "Delete task",  "delete", None),
+        row("⏰", "Snooze",        "snooze", None),
+        row("🍅", "Pomodoro",      "pomo",   None),
+        row("✔",  "Habit check",  "habit",  None),
+        row("🔍", "Jump to task", "jump",   None),
+        row("📅", "Calendar",     "cal",    None),
+        row("🪟", "Toggle conky", "toggle", None),
     ]
     try:
         picked = pick("Task", choices)
     except CancelledByUser:
         return 0
-    kind, payload = picked
+    kind, _payload = picked
     ns = argparse.Namespace()
-    if kind in ("add", "add_g"):
-        ns.guided = bool(payload)
+    if kind == "add":
         return add_mod.main(ns)
     if kind == "done":
         return done_mod.main(ns)
