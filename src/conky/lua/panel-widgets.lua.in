@@ -209,9 +209,13 @@ local function draw_kpi_ring(cr, cx, cy, count, label, accent_hex, soft_cap)
   local ratio = math.min(count / soft_cap, 1.0)
   local over = count > soft_cap
 
-  -- Track ring
+  -- Track ring. ``new_sub_path`` resets cairo's current point so
+  -- ``cairo_arc`` doesn't draw a line from wherever the previous
+  -- draw call left the pen — without it, consecutive rings get
+  -- joined by a diagonal "tail" line.
   rgba(cr, PALETTE.muted, 0.30)
   cairo_set_line_width(cr, KPI_THICKNESS)
+  cairo_new_sub_path(cr)
   cairo_arc(cr, cx, cy, KPI_RADIUS, 0, 2 * math.pi)
   cairo_stroke(cr)
 
@@ -220,6 +224,7 @@ local function draw_kpi_ring(cr, cx, cy, count, label, accent_hex, soft_cap)
     rgba(cr, over and PALETTE.alert or accent_hex, 1.0)
     cairo_set_line_width(cr, KPI_THICKNESS)
     cairo_set_line_cap(cr, 1)
+    cairo_new_sub_path(cr)
     local start = -math.pi / 2
     cairo_arc(cr, cx, cy, KPI_RADIUS, start, start + 2 * math.pi * ratio)
     cairo_stroke(cr)
@@ -262,6 +267,7 @@ local function draw_habit_ring(cr, cx, cy, habit)
   -- Track
   rgba(cr, PALETTE.muted, 0.25)
   cairo_set_line_width(cr, HABIT_THICKNESS)
+  cairo_new_sub_path(cr)
   cairo_arc(cr, cx, cy, HABIT_RADIUS, 0, 2 * math.pi)
   cairo_stroke(cr)
 
@@ -270,6 +276,7 @@ local function draw_habit_ring(cr, cx, cy, habit)
     rgba(cr, PALETTE.ok, 1.0)
     cairo_set_line_width(cr, HABIT_THICKNESS)
     cairo_set_line_cap(cr, 1)
+    cairo_new_sub_path(cr)
     cairo_arc(cr, cx, cy, HABIT_RADIUS, -math.pi / 2,
               -math.pi / 2 + 2 * math.pi * ratio)
     cairo_stroke(cr)
@@ -331,6 +338,7 @@ local function draw_calendar(cr, state)
         if is_today then
           -- Filled accent disc behind today's number
           rgba(cr, PALETTE.accent, 1.0)
+          cairo_new_sub_path(cr)
           cairo_arc(cr, cx, cy, 10, 0, 2 * math.pi)
           cairo_fill(cr)
           rgba(cr, PALETTE.bg, 1.0)  -- foreground reverses on the disc
@@ -350,6 +358,7 @@ local function draw_calendar(cr, state)
         -- since the filled disc already signals presence)
         if n_busy >= 1 and not is_today then
           rgba(cr, PALETTE.highlight, 0.9)
+          cairo_new_sub_path(cr)
           cairo_arc(cr, cx, cy + 8, 1.5, 0, 2 * math.pi)
           cairo_fill(cr)
         end
@@ -379,8 +388,14 @@ function conky_draw_panel()
 
   draw_kpi_row(cr, state)
 
-  draw_section_label(cr, 12, Y_HABITS_LABEL, 'Habits')
-  draw_habits(cr, state)
+  -- Habits — show the label only when at least one habit exists,
+  -- otherwise the panel carries a stray "HABITS" word above empty
+  -- space. The calendar section always renders since the month grid
+  -- is meaningful even when nothing is scheduled.
+  if state.habits_today and #state.habits_today > 0 then
+    draw_section_label(cr, 12, Y_HABITS_LABEL, 'Habits')
+    draw_habits(cr, state)
+  end
 
   draw_section_label(cr, 12, Y_CAL_LABEL, 'Calendar')
   draw_calendar(cr, state)
