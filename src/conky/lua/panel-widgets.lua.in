@@ -295,17 +295,19 @@ end
 
 -- ── section header (icon + label, section colour, bold) ────────────────────
 
--- Icon followed by exactly one space character before the label, no
--- additional hardcoded pixel gap — the font's own glyph cell padding
--- + the space char gives a natural, consistent spacing that scales
--- with the font size. Used by both the section headers and the
--- banner / error / refresh rows so every "icon + text" pair across
--- the panel has identical spacing.
+-- Icon then label with exactly one space between them. The space is
+-- rendered AS PART OF THE ICON STRING in the Nerd Font face — the
+-- Nerd Font Mono space advance (~one full cell) is wider than the
+-- main-family space and feels like a comfortable typographic gap,
+-- whereas FONT_FAM's own ASCII space at the same point size looks
+-- cramped against icons that fill their cell (tasks, bolt, fire).
+-- This also keeps the spacing identical across icons regardless of
+-- whether they're a 1-cell or 2-cell variant in the Nerd Font patch.
 
 local function draw_section_header(cr, x, y, icon, label)
   rgba(cr, PALETTE.section, 1.0)
-  local w = show_top(cr, x, y, icon, NF_FONT, 1, HEADER_SIZE)
-  show_top(cr, x + w, y, ' ' .. label, FONT_FAM, 1, HEADER_SIZE)
+  local w = show_top(cr, x, y, icon .. ' ', NF_FONT, 1, HEADER_SIZE)
+  show_top(cr, x + w, y, label, FONT_FAM, 1, HEADER_SIZE)
 end
 
 -- ── widget: banner ─────────────────────────────────────────────────────────
@@ -324,19 +326,19 @@ local function draw_banner(cr, y, meta)
 
   local color, label = age_label(meta)
   rgba(cr, color, 1.0)
-  -- Measure label WITH the leading space so the right-edge alignment
-  -- accounts for it (same "icon + ' ' + label" pattern as section
-  -- headers, just right-anchored).
-  local spaced_label = ' ' .. label
-  set_face(cr, FONT_FAM, 0, BODY_SIZE)
-  local lw = te(cr, spaced_label).x_advance
+  -- Mirror the section-header pattern: "icon + space" in the Nerd
+  -- Font, then the label in the main family, with the right edge
+  -- pinned to the panel margin.
+  local iconp = NF.refresh .. ' '
   set_face(cr, NF_FONT, 0, BODY_SIZE)
-  local iw = te(cr, NF.refresh).x_advance
+  local iw = te(cr, iconp).x_advance
+  set_face(cr, FONT_FAM, 0, BODY_SIZE)
+  local lw = te(cr, label).x_advance
   local row_y = y + (HEADER_SIZE - BODY_SIZE)
   local ico_x = PANEL_W - 16 - iw - lw
   local lbl_x = ico_x + iw
-  show_top(cr, ico_x, row_y, NF.refresh, NF_FONT, 0, BODY_SIZE)
-  show_top(cr, lbl_x, row_y, spaced_label, FONT_FAM, 0, BODY_SIZE)
+  show_top(cr, ico_x, row_y, iconp, NF_FONT, 0, BODY_SIZE)
+  show_top(cr, lbl_x, row_y, label, FONT_FAM, 0, BODY_SIZE)
 end
 
 -- ── widget: KPI tile (3 columns, big number + SmallCaps + bar) ─────────────
@@ -528,8 +530,8 @@ end
 
 local function draw_error_row(cr, y, err)
   rgba(cr, PALETTE.alert, 1.0)
-  local w = show_top(cr, 16, y, NF.warn, NF_FONT, 0, BODY_SIZE)
-  show_top(cr, 16 + w, y, ' ' .. err, FONT_FAM, 0, BODY_SIZE)
+  local w = show_top(cr, 16, y, NF.warn .. ' ', NF_FONT, 0, BODY_SIZE)
+  show_top(cr, 16 + w, y, err, FONT_FAM, 0, BODY_SIZE)
 end
 
 -- ── offscreen surface (cached at module scope) ─────────────────────────────
