@@ -144,8 +144,13 @@ let
         gap_x = 20,
         gap_y = 24,
         minimum_width = ${toString cfg.minWidth},
-        ${lib.optionalString (cfg.maxWidth != null)
-          "maximum_width = ${toString cfg.maxWidth},"}
+        -- Wayland conky pins the layer-shell surface width at startup
+        -- from maximum_width — omitting it produces a 0-width surface
+        -- the compositor silently drops. So we always emit it, defaulting
+        -- to minWidth + 60 when the user didn't set maxWidth explicitly.
+        maximum_width = ${toString (
+          if cfg.maxWidth != null then cfg.maxWidth else cfg.minWidth + 60
+        )},
         border_inner_margin = 12,
         border_outer_margin = 0,
 
@@ -257,10 +262,12 @@ in
       default = null;
       example = 420;
       description = ''
-        Upper bound on the panel width. ``null`` (default) means the
-        panel grows freely to fit content — task titles never wrap.
-        Set a concrete value if you want a stable maximum and accept
-        that long titles ellipsize.
+        Upper bound on the panel width. When ``null`` (default), the
+        emitted ``maximum_width`` is ``minWidth + 60`` — Wayland conky
+        needs a concrete value because the layer-shell surface size
+        is fixed at startup, not grown to fit content. Set explicitly
+        to widen further or to clamp tighter; long titles will
+        ellipsize at this width.
       '';
     };
 
