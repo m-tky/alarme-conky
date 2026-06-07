@@ -141,7 +141,9 @@ let
   doneTodayScript = mkBlock "done_today";
   inboxScript     = mkBlock "inbox";
   habitsScript    = mkBlock "habits";
-  pomoScript      = mkBlock "pomo";
+  # pomoScript intentionally absent — the Pomodoro session is rendered
+  # in the standalone top-layer overlay (see pomo_overlay.py), not in
+  # the panel, so the conky text doesn't reserve a row for it.
   calScript       = mkBlock "cal";
   notesScript     = mkBlock "notes";
   errScript       = mkBlock "err";
@@ -178,7 +180,11 @@ let
         own_window_argb_visual = true,
         own_window_argb_value = ${toString cfg.backgroundOpacity},
         own_window_colour = '${colors.bg}',
-        own_window_transparent = false,
+        -- own_window_transparent=true makes conky paint nothing for
+        -- the background — text floats on the wallpaper. We toggle
+        -- this on when the user has set backgroundOpacity to 0; the
+        -- argb path still works for the colour-blend case (1–254).
+        own_window_transparent = ${if cfg.backgroundOpacity == 0 then "true" else "false"},
         double_buffer = true,
 
         use_xft = true,
@@ -198,8 +204,6 @@ let
     conky.text = [[
     ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${execpi 5 ${ageScript}}
     ''${voffset 4}''${color7}─────────────────────────────''${color}
-
-    ${"\${"}execpi 1 ${pomoScript}}
 
     ''${color2}${icoBody glyph.bell}  ${boldExec counterScript "overdue"}  ''${color6}Overdue''${color}
     ''${color2}${icoBody glyph.clock}  ${boldExec counterScript "today"}  ''${color6}Today''${color}
@@ -339,8 +343,13 @@ in
 
     backgroundOpacity = lib.mkOption {
       type = lib.types.ints.between 0 255;
-      default = 180;
-      description = "ARGB alpha (0=transparent, 255=opaque). 180 ≈ 70% opacity.";
+      default = 0;
+      description = ''
+        ARGB alpha for the panel background fill (0=fully transparent,
+        255=fully opaque). Default is 0 — text floats on the wallpaper
+        without a darkened card behind it. Set to 180 for the classic
+        ~70%-opaque "panel card" look.
+      '';
     };
 
     theme = {
