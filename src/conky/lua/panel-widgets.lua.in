@@ -1,20 +1,28 @@
 -- panel-widgets.lua — full-cairo rendering of the alarme-conky panel.
 --
--- Every visible pixel (banner, divider, KPI rings, habit rings,
--- calendar grid, section headers, task / done / inbox / note / error
--- rows) is drawn by this Lua script through cairo. conky.text is now
--- a single ${voffset} that reserves panel height; we read state.json
--- ourselves and lay everything out vertically from y=0.
+-- Single render pipeline: everything visible is drawn here through
+-- cairo. conky.text is reduced to a single ${voffset cfg.panelHeight}
+-- that just reserves layer-shell surface size; we read state.json
+-- ourselves and lay out vertically from y=0.
 --
--- The motivation is a single render pipeline. The previous hybrid
--- (some sections via Pango through conky's text engine, the widget
--- sections via cairo here) produced visually inconsistent labels at
--- the same nominal font size, because the two engines hint and space
--- glyphs differently. Going all-cairo gives identical rendering for
--- every label and row in the panel.
+-- Design notes (2024-2026 conky-rice synthesis):
+--   - Ring gauges feel dated. KPI tile uses horizontal rounded-cap
+--     bars under big numbers + SmallCaps labels.
+--   - Background "cards" (rounded rects, low-alpha fill) demarcate
+--     the data-dense top half (KPI / Habits / Calendar); task lists
+--     below flow without cards for less visual noise.
+--   - Single accent colour (palette.section) carries the eye; alert
+--     colour reserved for overdue / errors.
+--   - One Nerd Font face for icons, one main face for everything
+--     else — no mid-line font switches in the hot path.
 --
--- All constants are substituted by home.nix at build time so the
--- script reads nothing from env or config at draw time.
+-- Flicker handling: Wayland conky runs in single-buffer mode (the
+-- layer-shell surface IS the drawing buffer). We composite onto an
+-- ARGB32 image surface cached at module scope and re-create on
+-- panel-size change only, then blit with CAIRO_OPERATOR_SOURCE in
+-- one paint at the end of each hook. Each visible frame is a
+-- fully-composed image — no half-drawn intermediate ever reaches
+-- the compositor.
 
 require('cairo')
 
@@ -41,9 +49,6 @@ local PALETTE = {
   accent   = '@ACCENT@',
 }
 
--- Nerd Font Font-Awesome codepoints used by section headers + banner.
--- Defined as Lua \u{xxxx} escapes (Lua 5.3+) so the source stays
--- editor-paste safe (no raw PUA chars in the file).
 local NF = {
   bolt    = '\u{f0e7}',
   refresh = '\u{f021}',
@@ -56,8 +61,6 @@ local NF = {
   warn    = '\u{f071}',
 }
 
--- Per-row sigils. Plain unicode (not PUA) so they render in the main
--- font family without a Nerd Font face switch.
 local SIG_BULLET = '\u{2022}'  -- •
 local SIG_CHECK  = '\u{2713}'  -- ✓
 
@@ -74,7 +77,7 @@ local function rgba(cr, h, a)
   cairo_set_source_rgba(cr, r, g, b, a or 1.0)
 end
 
--- ── text extents + drawing helpers ─────────────────────────────────────────
+-- ── text helpers ───────────────────────────────────────────────────────────
 
 local function te(cr, s)
   local ext = cairo_text_extents_t:create()
@@ -88,29 +91,24 @@ local function set_face(cr, family, weight, size)
   cairo_set_font_size(cr, size)
 end
 
--- Draw at (x, y) with the top of the glyph bounding box anchored at y.
--- Returns the advance width so callers can chain subsequent draws on
--- the same baseline.
 local function show_top(cr, x, y, s, family, weight, size)
   set_face(cr, family, weight, size)
   local e = te(cr, s)
   cairo_move_to(cr, x - e.x_bearing, y - e.y_bearing)
   cairo_show_text(cr, s)
+  cairo_new_path(cr)  -- defensive: don't leave a current point
   return e.x_advance
 end
 
--- Draw centred at (cx, cy) on both axes.
 local function show_centred(cr, cx, cy, s, family, weight, size)
   set_face(cr, family, weight, size)
   local e = te(cr, s)
   cairo_move_to(cr, cx - e.width / 2 - e.x_bearing,
                     cy - e.y_bearing - e.height / 2)
   cairo_show_text(cr, s)
+  cairo_new_path(cr)
 end
 
--- Iterate a UTF-8 string char by char. The pattern matches one
--- "starter" byte (0x00–0x7F or 0xC2–0xF4) followed by any number of
--- continuation bytes (0x80–0xBF). Good enough for our task titles.
 local function utf8_chars(s)
   local out = {}
   for ch in s:gmatch('[%z\1-\127\194-\244][\128-\191]*') do
@@ -119,16 +117,11 @@ local function utf8_chars(s)
   return out
 end
 
--- Truncate ``s`` to fit ``max_w`` pixels at (family/weight/size),
--- appending an ellipsis when truncated.
 local function truncate(cr, s, max_w, family, weight, size)
   set_face(cr, family, weight, size)
-  local full = te(cr, s)
-  if full.x_advance <= max_w then return s end
+  if te(cr, s).x_advance <= max_w then return s end
   local ell = '\u{2026}'
   local chars = utf8_chars(s)
-  -- Greedy shrink: drop one char at a time from the tail until the
-  -- ellipsised string fits. O(n) on title length, fine at 1Hz.
   for n = #chars - 1, 1, -1 do
     local cand = table.concat(chars, '', 1, n) .. ell
     if te(cr, cand).x_advance <= max_w then return cand end
@@ -136,17 +129,35 @@ local function truncate(cr, s, max_w, family, weight, size)
   return ell
 end
 
--- ── JSON loading (state.json) ──────────────────────────────────────────────
---
--- Cache the parsed state by raw-content equality. The fetcher
--- rewrites state.json every poll cycle (~30s), but our draw hook
--- fires every second — so most frames we'd otherwise re-parse the
--- same JSON we parsed last frame. The parse is by far the most
--- expensive thing in the hot path; skipping it when the content is
--- byte-identical cuts the per-frame cost dramatically and removes
--- the visible "I-took-too-long" flicker.
+-- SmallCaps: letter-spaced uppercase. Used for KPI sub-labels.
+local function show_smallcaps(cr, x, y, s, size, color_hex, spacing, weight)
+  spacing = spacing or 1.8
+  set_face(cr, FONT_FAM, weight or 1, size)
+  rgba(cr, color_hex, 1.0)
+  local cur_x = x
+  for ch in s:upper():gmatch('.') do
+    local e = te(cr, ch)
+    cairo_move_to(cr, cur_x - e.x_bearing, y - e.y_bearing)
+    cairo_show_text(cr, ch)
+    cur_x = cur_x + e.x_advance + spacing
+  end
+  cairo_new_path(cr)
+  return cur_x - x  -- total width
+end
 
-local _decode  -- forward decl so load_state can pcall it
+local function smallcaps_width(cr, s, size, spacing, weight)
+  spacing = spacing or 1.8
+  set_face(cr, FONT_FAM, weight or 1, size)
+  local w = 0
+  for ch in s:upper():gmatch('.') do
+    w = w + te(cr, ch).x_advance + spacing
+  end
+  return w
+end
+
+-- ── JSON loading (with raw-content cache) ──────────────────────────────────
+
+local _decode  -- forward decl
 local _cached_raw   = nil
 local _cached_state = {}
 
@@ -162,7 +173,6 @@ local function load_state()
   return _cached_state
 end
 
--- Minimal JSON decoder — handles every shape the fetcher emits.
 _decode = function(s)
   local pos = 1
   local function ws()
@@ -193,11 +203,10 @@ _decode = function(s)
       while true do
         ws()
         local k = val()
-        ws(); pos = pos + 1  -- skip ':'
+        ws(); pos = pos + 1
         local v = val(); t[k] = v
         ws()
-        local nxt = s:sub(pos, pos)
-        pos = pos + 1
+        local nxt = s:sub(pos, pos); pos = pos + 1
         if nxt == '}' then return t end
       end
     elseif c == '[' then
@@ -205,8 +214,7 @@ _decode = function(s)
       if s:sub(pos, pos) == ']' then pos = pos + 1; return t end
       while true do
         local v = val(); table.insert(t, v); ws()
-        local nxt = s:sub(pos, pos)
-        pos = pos + 1
+        local nxt = s:sub(pos, pos); pos = pos + 1
         if nxt == ']' then return t end
       end
     elseif c == 't' then pos = pos + 4; return true
@@ -223,24 +231,66 @@ _decode = function(s)
   return val()
 end
 
--- ── widget: gradient divider ───────────────────────────────────────────────
+-- ── primitives: rounded rect card, progress bar ────────────────────────────
 
+local function path_round_rect(cr, x, y, w, h, r)
+  cairo_new_sub_path(cr)
+  cairo_arc(cr, x + w - r, y + r,     r, -math.pi / 2,  0)
+  cairo_arc(cr, x + w - r, y + h - r, r,  0,             math.pi / 2)
+  cairo_arc(cr, x + r,     y + h - r, r,  math.pi / 2,   math.pi)
+  cairo_arc(cr, x + r,     y + r,     r,  math.pi,       3 * math.pi / 2)
+  cairo_close_path(cr)
+end
+
+local function draw_card(cr, x, y, w, h, r, color, alpha)
+  path_round_rect(cr, x, y, w, h, r)
+  rgba(cr, color, alpha)
+  cairo_fill(cr)
+  cairo_new_path(cr)
+end
+
+-- Rounded-cap horizontal progress bar. Track always drawn at low
+-- alpha; fill drawn at full alpha when ratio>0. Caps round naturally
+-- because we use ``cairo_set_line_cap(cr, 1)`` (= CAIRO_LINE_CAP_ROUND).
+local function draw_progress_bar(cr, x, y, w, h, ratio, fill_color, track_alpha)
+  cairo_set_line_cap(cr, 1)
+  cairo_set_line_width(cr, h)
+
+  -- Track
+  rgba(cr, PALETTE.muted, track_alpha or 0.18)
+  cairo_move_to(cr, x + h / 2, y + h / 2)
+  cairo_line_to(cr, x + w - h / 2, y + h / 2)
+  cairo_stroke(cr)
+  cairo_new_path(cr)
+
+  if ratio > 0 then
+    local r = math.min(ratio, 1.0)
+    rgba(cr, fill_color, 1.0)
+    cairo_move_to(cr, x + h / 2, y + h / 2)
+    cairo_line_to(cr, x + h / 2 + (w - h) * r, y + h / 2)
+    cairo_stroke(cr)
+    cairo_new_path(cr)
+  end
+end
+
+-- Gradient divider line (used between every major panel section)
 local function draw_divider(cr, y)
-  local x0, x1 = 12, PANEL_W - 12
+  local x0, x1 = 16, PANEL_W - 16
   local pat = cairo_pattern_create_linear(x0, y, x1, y)
   local r, g, b = hex(PALETTE.divider)
-  cairo_pattern_add_color_stop_rgba(pat, 0,    r, g, b, 0)
-  cairo_pattern_add_color_stop_rgba(pat, 0.5,  r, g, b, 0.7)
-  cairo_pattern_add_color_stop_rgba(pat, 1,    r, g, b, 0)
+  cairo_pattern_add_color_stop_rgba(pat, 0,   r, g, b, 0)
+  cairo_pattern_add_color_stop_rgba(pat, 0.5, r, g, b, 0.6)
+  cairo_pattern_add_color_stop_rgba(pat, 1,   r, g, b, 0)
   cairo_set_source(cr, pat)
   cairo_set_line_width(cr, 1)
   cairo_move_to(cr, x0, y)
   cairo_line_to(cr, x1, y)
   cairo_stroke(cr)
   cairo_pattern_destroy(pat)
+  cairo_new_path(cr)
 end
 
--- ── widget: section header (icon + label, section colour, bold) ────────────
+-- ── section header (icon + label, section colour, bold) ────────────────────
 
 local function draw_section_header(cr, x, y, icon, label)
   rgba(cr, PALETTE.section, 1.0)
@@ -248,7 +298,7 @@ local function draw_section_header(cr, x, y, icon, label)
   show_top(cr, x + w + 6, y, ' ' .. label, FONT_FAM, 1, HEADER_SIZE)
 end
 
--- ── widget: banner (title left, freshness badge right) ─────────────────────
+-- ── widget: banner ─────────────────────────────────────────────────────────
 
 local function age_label(meta)
   local epoch = tonumber(meta.fetched_at_epoch) or 0
@@ -260,152 +310,129 @@ local function age_label(meta)
 end
 
 local function draw_banner(cr, y, meta)
-  -- Left: bolt icon + "Alarme"
-  draw_section_header(cr, 12, y, NF.bolt, 'Alarme')
+  draw_section_header(cr, 16, y, NF.bolt, 'Alarme')
 
-  -- Right: refresh icon + age, body size, age-coloured. We anchor on
-  -- the same top-y as the header so the two read as one row even
-  -- though they use different font sizes.
   local color, label = age_label(meta)
   rgba(cr, color, 1.0)
   set_face(cr, FONT_FAM, 0, BODY_SIZE)
   local lw = te(cr, label).x_advance
   set_face(cr, NF_FONT, 0, BODY_SIZE)
   local iw = te(cr, NF.refresh).x_advance
-  -- Right-align: label hugs PANEL_W - 12, icon to its left
-  local row_y = y + (HEADER_SIZE - BODY_SIZE)  -- align baselines
-  local age_x = PANEL_W - 12 - lw
+  local row_y = y + (HEADER_SIZE - BODY_SIZE)
+  local age_x = PANEL_W - 16 - lw
   local ico_x = age_x - iw - 4
   show_top(cr, ico_x, row_y, NF.refresh, NF_FONT, 0, BODY_SIZE)
   show_top(cr, age_x, row_y, label, FONT_FAM, 0, BODY_SIZE)
 end
 
--- ── widget: KPI ring tile (count + soft-cap fill + sub-label) ──────────────
+-- ── widget: KPI tile (3 columns, big number + SmallCaps + bar) ─────────────
 
-local KPI_R          = 32
-local KPI_T          = 5
-local KPI_LABEL_GAP  = 14
+local KPI_TILE_PAD   = 16   -- inner padding inside card
+local KPI_NUM_SIZE   = 30   -- big digit
+local KPI_LABEL_SIZE = 10   -- SmallCaps label
+local KPI_BAR_H      = 4
 
-local function draw_kpi_ring(cr, cx, cy, count, label, accent, soft_cap)
-  soft_cap = soft_cap or 10
-  local ratio = math.min(count / soft_cap, 1.0)
-  local over = count > soft_cap
+-- Card height accommodates: label row + number row + bar + paddings.
+local KPI_CARD_H = KPI_TILE_PAD + KPI_LABEL_SIZE + 6 + KPI_NUM_SIZE
+                   + 10 + KPI_BAR_H + KPI_TILE_PAD
 
-  -- Track ring (new_sub_path resets cairo's current point so the next
-  -- arc isn't connected by a stray "tail" line from the previous one)
-  rgba(cr, PALETTE.muted, 0.30)
-  cairo_set_line_width(cr, KPI_T)
-  cairo_new_sub_path(cr)
-  cairo_arc(cr, cx, cy, KPI_R, 0, 2 * math.pi)
-  cairo_stroke(cr)
+local function draw_kpi_column(cr, x, w, cy_top, count, label, soft_cap, fill_color)
+  -- Label (SmallCaps), centered in the column at the top
+  local label_w = smallcaps_width(cr, label, KPI_LABEL_SIZE, 1.6, 1)
+  show_smallcaps(cr, x + (w - label_w) / 2, cy_top, label,
+                 KPI_LABEL_SIZE, PALETTE.muted, 1.6, 1)
 
-  if count > 0 then
-    rgba(cr, over and PALETTE.alert or accent, 1.0)
-    cairo_set_line_width(cr, KPI_T)
-    cairo_set_line_cap(cr, 1)
-    cairo_new_sub_path(cr)
-    local start = -math.pi / 2
-    cairo_arc(cr, cx, cy, KPI_R, start, start + 2 * math.pi * ratio)
-    cairo_stroke(cr)
-  end
-
-  -- Centre digit
+  -- Big number, centered
+  local num_y = cy_top + KPI_LABEL_SIZE + 8
   rgba(cr, PALETTE.fg, 1.0)
-  show_centred(cr, cx, cy, tostring(count), FONT_FAM, 1, 28)
+  set_face(cr, FONT_FAM, 0, KPI_NUM_SIZE)  -- regular weight for "thin" feel
+  local s = tostring(count)
+  local e = te(cr, s)
+  cairo_move_to(cr, x + (w - e.width) / 2 - e.x_bearing, num_y - e.y_bearing)
+  cairo_show_text(cr, s)
+  cairo_new_path(cr)
 
-  -- Sub-label below — letter-spaced uppercase ("SmallCaps")
-  set_face(cr, FONT_FAM, 1, 10)
-  local upper = label:upper()
-  local total_w = 0
-  for ch in upper:gmatch('.') do
-    total_w = total_w + te(cr, ch).x_advance + 1.8
-  end
-  rgba(cr, PALETTE.muted, 1.0)
-  local cur = cx - total_w / 2
-  local ly = cy + KPI_R + KPI_LABEL_GAP
-  for ch in upper:gmatch('.') do
-    local e = te(cr, ch)
-    cairo_move_to(cr, cur - e.x_bearing, ly - e.y_bearing)
-    cairo_show_text(cr, ch)
-    cur = cur + e.x_advance + 1.8
-  end
+  -- Bar
+  local bar_y = num_y + KPI_NUM_SIZE + 6
+  local bar_x = x + 8
+  local bar_w = w - 16
+  local ratio = math.min((count or 0) / soft_cap, 1.0)
+  local over  = (count or 0) > soft_cap
+  draw_progress_bar(cr, bar_x, bar_y, bar_w, KPI_BAR_H, ratio,
+                    over and PALETTE.alert or fill_color, 0.18)
 end
 
-local function draw_kpi_row(cr, y_top, counters)
-  local cy = y_top + KPI_R
-  local cs = { PANEL_W / 6, PANEL_W / 2, 5 * PANEL_W / 6 }
-  draw_kpi_ring(cr, cs[1], cy, counters.overdue   or 0, 'overdue', PALETTE.alert,     5)
-  draw_kpi_ring(cr, cs[2], cy, counters.today     or 0, 'today',   PALETTE.highlight, 8)
-  draw_kpi_ring(cr, cs[3], cy, counters.this_week or 0, 'week',    PALETTE.section,  15)
+local function draw_kpi_tile(cr, x, y, w, counters)
+  -- Card background
+  draw_card(cr, x, y, w, KPI_CARD_H, 12, PALETTE.section, 0.06)
+
+  local col_w = (w - KPI_TILE_PAD * 2) / 3
+  local col_x0 = x + KPI_TILE_PAD
+  local cy_top = y + KPI_TILE_PAD
+
+  draw_kpi_column(cr, col_x0,             col_w, cy_top, counters.today     or 0,
+                  'today',   8,  PALETTE.highlight)
+  draw_kpi_column(cr, col_x0 + col_w,     col_w, cy_top, counters.overdue   or 0,
+                  'overdue', 5,  PALETTE.alert)
+  draw_kpi_column(cr, col_x0 + col_w * 2, col_w, cy_top, counters.this_week or 0,
+                  'week',    15, PALETTE.section)
 end
 
--- ── widget: habit rings ────────────────────────────────────────────────────
+-- ── widget: habit rows (name + bar + ratio) ────────────────────────────────
 
-local HABIT_R  = 14
-local HABIT_T  = 4
-local HABIT_SP = 38
+local HABIT_ROW_H = 22
+local HABIT_BAR_H = 4
 
-local function draw_habit_ring(cr, cx, cy, habit)
-  local count = tonumber(habit.count) or 0
+local function draw_habit_row(cr, x, y, w, habit)
+  local name   = habit.title or habit.name or ''
+  local count  = tonumber(habit.count) or 0
   local target = tonumber(habit.target_count) or 1
-  local ratio = math.min(count / target, 1.0)
+  local ratio  = math.min(count / target, 1.0)
+  local done   = ratio >= 1.0
 
-  rgba(cr, PALETTE.muted, 0.25)
-  cairo_set_line_width(cr, HABIT_T)
-  cairo_new_sub_path(cr)
-  cairo_arc(cr, cx, cy, HABIT_R, 0, 2 * math.pi)
-  cairo_stroke(cr)
+  -- Name (left, truncated to leave room for bar + ratio)
+  local ratio_txt = count .. '/' .. target
+  set_face(cr, FONT_FAM, 0, BODY_SIZE)
+  local rt_w = te(cr, ratio_txt).x_advance
+  local name_max_w = math.floor(w * 0.40)
+  local trunc = truncate(cr, name, name_max_w, FONT_FAM, 0, BODY_SIZE)
+  rgba(cr, done and PALETTE.ok or PALETTE.fg, 1.0)
+  show_top(cr, x, y, trunc, FONT_FAM, 0, BODY_SIZE)
 
-  if ratio > 0 then
-    rgba(cr, PALETTE.ok, 1.0)
-    cairo_set_line_width(cr, HABIT_T)
-    cairo_set_line_cap(cr, 1)
-    cairo_new_sub_path(cr)
-    cairo_arc(cr, cx, cy, HABIT_R, -math.pi / 2,
-              -math.pi / 2 + 2 * math.pi * ratio)
-    cairo_stroke(cr)
-  end
+  -- Bar in the middle
+  local bar_x = x + name_max_w + 12
+  local bar_w = w - name_max_w - 12 - rt_w - 10
+  local bar_y = y + (BODY_SIZE - HABIT_BAR_H) / 2 + 2
+  draw_progress_bar(cr, bar_x, bar_y, bar_w, HABIT_BAR_H, ratio,
+                    done and PALETTE.ok or PALETTE.section, 0.18)
 
-  if target > 1 then
-    rgba(cr, PALETTE.fg, 0.9)
-    show_centred(cr, cx, cy, tostring(count), FONT_FAM, 1, 12)
-  end
+  -- Ratio text (right-aligned)
+  rgba(cr, PALETTE.muted, 1.0)
+  show_top(cr, x + w - rt_w, y, ratio_txt, FONT_FAM, 0, BODY_SIZE)
 end
 
-local function draw_habits(cr, y_top, habits)
-  local n = math.min(#habits, 7)
-  local total_w = (n - 1) * HABIT_SP + 2 * HABIT_R
-  local start_x = (PANEL_W - total_w) / 2 + HABIT_R
-  local cy = y_top + HABIT_R
-  for i = 1, n do
-    local cx = start_x + (i - 1) * HABIT_SP
-    draw_habit_ring(cr, cx, cy, habits[i])
-  end
-end
+-- ── widget: calendar grid ──────────────────────────────────────────────────
 
--- ── widget: calendar grid (month heat-map) ─────────────────────────────────
-
-local CAL_CELL_W = (PANEL_W - 24) / 7
-local CAL_CELL_H = 28
-local CAL_WK_H   = 20
+local CAL_CELL_H = 26
+local CAL_WK_H   = 18
 
 local function busy_n(busy, day)
   if not busy then return 0 end
   return tonumber(busy[tostring(day)] or busy[day]) or 0
 end
 
-local function draw_calendar(cr, y_top, cal)
+local function draw_calendar(cr, x, y_top, w, cal)
   local today = tonumber(cal.today) or 0
   local weeks = cal.weeks or {}
   local busy  = cal.busy or {}
+  local cell_w = w / 7
 
   -- Weekday header row
-  local wk_y = y_top + CAL_WK_H / 2
   local labels = { 'M', 'T', 'W', 'T', 'F', 'S', 'S' }
   rgba(cr, PALETTE.muted, 0.85)
   for i, lbl in ipairs(labels) do
-    local cx = 12 + (i - 0.5) * CAL_CELL_W
-    show_centred(cr, cx, wk_y, lbl, FONT_FAM, 1, 11)
+    local cx = x + (i - 0.5) * cell_w
+    show_centred(cr, cx, y_top + CAL_WK_H / 2, lbl, FONT_FAM, 1, 11)
   end
 
   -- Day grid
@@ -413,17 +440,19 @@ local function draw_calendar(cr, y_top, cal)
   for row_i, week in ipairs(weeks) do
     for col_i, day in ipairs(week) do
       if day > 0 then
-        local cx = 12 + (col_i - 0.5) * CAL_CELL_W
+        local cx = x + (col_i - 0.5) * cell_w
         local cy = grid_y + (row_i - 0.5) * CAL_CELL_H
         local is_today = (day == today)
         local n = busy_n(busy, day)
         local is_past = day < today
 
         if is_today then
+          -- Filled accent disc behind today's number
           rgba(cr, PALETTE.accent, 1.0)
           cairo_new_sub_path(cr)
-          cairo_arc(cr, cx, cy, 12, 0, 2 * math.pi)
+          cairo_arc(cr, cx, cy, 11, 0, 2 * math.pi)
           cairo_fill(cr)
+          cairo_new_path(cr)
           rgba(cr, PALETTE.bg, 1.0)
         elseif n >= 3 then
           rgba(cr, PALETTE.alert, 0.95)
@@ -432,7 +461,7 @@ local function draw_calendar(cr, y_top, cal)
         elseif is_past then
           rgba(cr, PALETTE.muted, 0.40)
         else
-          rgba(cr, PALETTE.fg, 0.80)
+          rgba(cr, PALETTE.fg, 0.85)
         end
 
         show_centred(cr, cx, cy, tostring(day), FONT_FAM, 0, 13)
@@ -440,8 +469,9 @@ local function draw_calendar(cr, y_top, cal)
         if n >= 1 and not is_today then
           rgba(cr, PALETTE.highlight, 0.9)
           cairo_new_sub_path(cr)
-          cairo_arc(cr, cx, cy + 10, 1.8, 0, 2 * math.pi)
+          cairo_arc(cr, cx, cy + 9, 1.8, 0, 2 * math.pi)
           cairo_fill(cr)
+          cairo_new_path(cr)
         end
       end
     end
@@ -450,39 +480,30 @@ end
 
 -- ── list rows (task / done / inbox / notes) ────────────────────────────────
 
-local LIST_X    = 24                 -- indent under section header
-local ROW_H     = BODY_SIZE + 6      -- per-row vertical step
-local SIGIL_GAP = 8                  -- space between sigil and title
+local LIST_X    = 32
+local ROW_H     = BODY_SIZE + 6
+local SIGIL_GAP = 10
 
--- Draw a list row: <sigil> <title …> [<right-aligned time>]
 local function draw_list_row(cr, y, title, sigil, sigil_color, title_color, right_text)
-  -- Sigil
   rgba(cr, sigil_color, 1.0)
   local sw = show_top(cr, LIST_X, y, sigil, FONT_FAM, 0, BODY_SIZE)
 
-  -- Compute right-text width so the title can be truncated to leave
-  -- room. Empty string → no reservation.
   local right_w = 0
   if right_text and right_text ~= '' then
     set_face(cr, FONT_FAM, 0, BODY_SIZE)
     right_w = te(cr, right_text).x_advance + 8
   end
 
-  -- Title with truncation
   local title_x = LIST_X + sw + SIGIL_GAP
-  local max_title_w = PANEL_W - 12 - title_x - right_w
+  local max_title_w = PANEL_W - 16 - title_x - right_w
   local trunc = truncate(cr, title or '', max_title_w, FONT_FAM, 0, BODY_SIZE)
   rgba(cr, title_color, 1.0)
   show_top(cr, title_x, y, trunc, FONT_FAM, 0, BODY_SIZE)
 
-  -- Right-aligned text (e.g. scheduled time)
   if right_w > 0 then
     rgba(cr, PALETTE.muted, 1.0)
-    set_face(cr, FONT_FAM, 0, BODY_SIZE)
-    local e = te(cr, right_text)
-    local rx = PANEL_W - 12 - e.x_advance
-    cairo_move_to(cr, rx - e.x_bearing, y - e.y_bearing)
-    cairo_show_text(cr, right_text)
+    show_top(cr, PANEL_W - 16 - te(cr, right_text).x_advance, y,
+             right_text, FONT_FAM, 0, BODY_SIZE)
   end
 end
 
@@ -493,71 +514,88 @@ end
 
 local function draw_error_row(cr, y, err)
   rgba(cr, PALETTE.alert, 1.0)
-  local w = show_top(cr, 12, y, NF.warn, NF_FONT, 0, BODY_SIZE)
-  show_top(cr, 12 + w + 6, y, ' ' .. err, FONT_FAM, 0, BODY_SIZE)
+  local w = show_top(cr, 16, y, NF.warn, NF_FONT, 0, BODY_SIZE)
+  show_top(cr, 16 + w + 6, y, ' ' .. err, FONT_FAM, 0, BODY_SIZE)
+end
+
+-- ── offscreen surface (cached at module scope) ─────────────────────────────
+-- Recreating the image surface every frame causes a tiny per-frame
+-- alloc/zero cycle (cheap, but it adds up against the 16ms budget on
+-- single-buffer Wayland). Cache it; we ``cairo_set_operator(CLEAR)``
+-- + ``cairo_paint`` at the top of each draw to wipe stale pixels.
+
+local _offscreen = nil
+
+local function get_offscreen()
+  if _offscreen == nil then
+    _offscreen = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, PANEL_W, PANEL_H)
+  end
+  return _offscreen
 end
 
 -- ── main draw hook ─────────────────────────────────────────────────────────
---
--- Wayland conky runs in single-buffer mode (the layer-shell surface
--- IS the drawing buffer — there's no separate back buffer to swap).
--- That means anything that draws between conky's per-frame clear and
--- the next compositor frame callback is visible on screen, including
--- the half-drawn intermediate state of our cairo paths. The user
--- perceives that as flicker on every redraw.
---
--- The fix is to render everything onto an in-memory ARGB32 surface
--- first, then ``cairo_paint`` the whole image onto conky's surface
--- in one shot. The blit is a single rectangular memcpy from cairo's
--- perspective, so there's no intermediate "half-drawn" frame.
 
 function conky_draw_panel()
   if conky_window == nil then return end
   local cs = conky_surface()
   if cs == nil then return end
 
-  -- Offscreen ARGB32 surface — same size as the panel. We always
-  -- (re)create it per frame; cairo image surfaces are cheap.
-  local off = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, PANEL_W, PANEL_H)
+  local off = get_offscreen()
   local cr = cairo_create(off)
+
+  -- Wipe the offscreen surface to fully-transparent before drawing.
+  -- CAIRO_OPERATOR_CLEAR sets dest to zero — required because the
+  -- surface persists across frames.
+  cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR)
+  cairo_paint(cr)
+  cairo_set_operator(cr, CAIRO_OPERATOR_OVER)
 
   local ok, st = pcall(load_state)
   st = (ok and st) or {}
   local data = st.data or {}
   local meta = st.meta or {}
 
-  -- Banner row (title + age)
-  draw_banner(cr, 8, meta)
-  -- Divider just below the banner row baseline
-  draw_divider(cr, 8 + HEADER_SIZE + 14)
+  -- Layout pass — compute Y as we go.
+  local y = 16  -- top margin
 
-  -- KPI rings tile row
-  local KPI_TOP = 8 + HEADER_SIZE + 14 + 14
-  draw_kpi_row(cr, KPI_TOP, data.counters or {})
-  -- KPI block consumes 2*KPI_R + sub-label gap + sub-label height
-  local KPI_BOTTOM = KPI_TOP + KPI_R * 2 + KPI_LABEL_GAP + 12
+  -- Banner row
+  draw_banner(cr, y, meta)
+  y = y + HEADER_SIZE + 12
 
-  local y = KPI_BOTTOM + 18  -- gap below KPI tile
+  draw_divider(cr, y)
+  y = y + 12
+
+  -- KPI tile (card with 3 columns of bar gauges)
+  draw_kpi_tile(cr, 16, y, PANEL_W - 32, data.counters or {})
+  y = y + KPI_CARD_H + 16
 
   -- Habits — only if at least one habit exists
   local habits = data.habits_today or {}
   if #habits > 0 then
-    draw_section_header(cr, 12, y, NF.fire, 'Habits')
-    y = y + HEADER_SIZE + 12
-    draw_habits(cr, y, habits)
-    y = y + HABIT_R * 2 + 16
+    draw_section_header(cr, 16, y, NF.fire, 'Habits')
+    y = y + HEADER_SIZE + 10
+    for i = 1, math.min(#habits, 4) do
+      draw_habit_row(cr, 24, y, PANEL_W - 48, habits[i])
+      y = y + HABIT_ROW_H
+    end
+    y = y + 6
+    draw_divider(cr, y)
+    y = y + 12
   end
 
-  -- Calendar — always shown
-  draw_section_header(cr, 12, y, NF.cal, 'Calendar')
-  y = y + HEADER_SIZE + 12
+  -- Calendar — always
+  draw_section_header(cr, 16, y, NF.cal, 'Calendar')
+  y = y + HEADER_SIZE + 10
   local cal = data.calendar_struct or {}
-  draw_calendar(cr, y, cal)
+  draw_calendar(cr, 16, y, PANEL_W - 32, cal)
   local weeks = cal.weeks or {}
-  y = y + CAL_WK_H + #weeks * CAL_CELL_H + 16
+  y = y + CAL_WK_H + #weeks * CAL_CELL_H + 8
+
+  draw_divider(cr, y)
+  y = y + 12
 
   -- Today
-  draw_section_header(cr, 12, y, NF.today, 'Today')
+  draw_section_header(cr, 16, y, NF.today, 'Today')
   y = y + HEADER_SIZE + 8
   local today_tasks = data.today_tasks or {}
   if #today_tasks == 0 then
@@ -572,12 +610,12 @@ function conky_draw_panel()
       y = y + ROW_H
     end
   end
-  y = y + 8
+  y = y + 6
 
   -- Done today
   local done = data.done_today_tasks or {}
   if #done > 0 then
-    draw_section_header(cr, 12, y, NF.check, 'Done today')
+    draw_section_header(cr, 16, y, NF.check, 'Done today')
     y = y + HEADER_SIZE + 8
     local shown = math.min(#done, 4)
     for i = 1, shown do
@@ -591,13 +629,13 @@ function conky_draw_panel()
       draw_muted_row(cr, y, ('+ %d more'):format(more))
       y = y + ROW_H
     end
-    y = y + 8
+    y = y + 6
   end
 
   -- Inbox
   local inbox = data.inbox_tasks or {}
   if (data.inbox_count or 0) > 0 then
-    draw_section_header(cr, 12, y, NF.inbox, 'Inbox')
+    draw_section_header(cr, 16, y, NF.inbox, 'Inbox')
     y = y + HEADER_SIZE + 8
     local shown = math.min(#inbox, 4)
     for i = 1, shown do
@@ -611,13 +649,13 @@ function conky_draw_panel()
       draw_muted_row(cr, y, ('+ %d more'):format(more))
       y = y + ROW_H
     end
-    y = y + 8
+    y = y + 6
   end
 
-  -- Notes (recent)
+  -- Notes
   local notes = data.notes_recent or {}
   if #notes > 0 then
-    draw_section_header(cr, 12, y, NF.note, 'Notes')
+    draw_section_header(cr, 16, y, NF.note, 'Notes')
     y = y + HEADER_SIZE + 8
     for i = 1, math.min(#notes, 3) do
       local n = notes[i] or {}
@@ -625,10 +663,10 @@ function conky_draw_panel()
                     SIG_BULLET, PALETTE.muted, PALETTE.fg, nil)
       y = y + ROW_H
     end
-    y = y + 8
+    y = y + 6
   end
 
-  -- Error banner — last line, alert-coloured
+  -- Error banner — alert-coloured, last line
   local err = meta.last_error
   if err and err ~= '' then
     draw_error_row(cr, y, err)
@@ -636,16 +674,12 @@ function conky_draw_panel()
 
   cairo_destroy(cr)
 
-  -- One-shot blit of the fully-drawn offscreen surface onto conky's
-  -- real (visible) surface. CAIRO_OPERATOR_SOURCE — not the default
-  -- OVER — so the destination is *replaced* by our pixels rather
-  -- than alpha-blended on top of whatever conky already painted;
-  -- this preserves our transparent regions (so the wallpaper shows
-  -- through unmodified) instead of double-stacking the bg colour.
+  -- Final blit: replace conky's surface with our fully-composed
+  -- offscreen image in one paint. SOURCE not OVER so transparent
+  -- regions stay transparent.
   local outr = cairo_create(cs)
   cairo_set_operator(outr, CAIRO_OPERATOR_SOURCE)
   cairo_set_source_surface(outr, off, 0, 0)
   cairo_paint(outr)
   cairo_destroy(outr)
-  cairo_surface_destroy(off)
 end
