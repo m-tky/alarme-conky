@@ -392,8 +392,10 @@ def _render_month_grid(today_dt: date, busy_counts: dict[int, int]) -> str:
     nbsp = " "
     cal_obj = calendar_mod.Calendar(firstweekday=0)
     weeks = cal_obj.monthdayscalendar(today_dt.year, today_dt.month)
-    header = nbsp.join(["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"])
-    lines: list[str] = [f"${{color1}}{header}${{color}}"]
+    # The weekday header ("Mo Tu …") is emitted by the conkyrc as a
+    # static bold line; we render only the date rows here so font
+    # changes in home.nix don't require restarting the fetcher.
+    lines: list[str] = []
     for week in weeks:
         cells: list[str] = []
         for day in week:
