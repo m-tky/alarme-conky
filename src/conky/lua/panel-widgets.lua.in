@@ -54,7 +54,10 @@ local NF = {
   refresh = '\u{f021}',
   fire    = '\u{f06d}',
   cal     = '\u{f073}',
-  today   = '\u{f017}',
+  -- "today" uses tasks (3 lines + checkboxes), not clock — the FA
+  -- clock glyph is a thin circle outline and reads as visibly
+  -- smaller than the other section icons in the same mono cell.
+  today   = '\u{f0ae}',
   check   = '\u{f058}',
   inbox   = '\u{f01c}',
   note    = '\u{f0f6}',
