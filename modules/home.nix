@@ -201,8 +201,8 @@ let
 
         -- Cairo-drawn widgets (KPI rings, habit rings, calendar
         -- heatmap). The Lua draws into the reserved region above the
-        -- text sections; conky.text uses ${voffset} to skip past the
-        -- widget zone before rendering the first text row.
+        -- text sections; conky.text uses a voffset directive to skip
+        -- past the widget zone before rendering the first text row.
         lua_load = '${panelWidgetsLua}',
         lua_draw_hook_post = 'conky_draw_panel',
         default_color = '${colors.fg}',
