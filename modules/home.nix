@@ -204,6 +204,8 @@ let
     ''${color1}${hdr "${icoHeader glyph.bolt} Alarme"}''${color}  ''${execpi 5 ${ageScript}}
     ''${voffset 4}''${color7}─────────────────────────────''${color}
 
+    ${"\${"}execpi 1 ${pomoScript}}
+
     ''${color2}${icoBody glyph.bell}  ${boldExec counterScript "overdue"}  ''${color6}Overdue''${color}
     ''${color2}${icoBody glyph.clock}  ${boldExec counterScript "today"}  ''${color6}Today''${color}
     ''${color2}${icoBody glyph.calWeek}  ${boldExec counterScript "this_week"}  ''${color6}This week''${color}
@@ -213,7 +215,6 @@ let
     ''${execpi 30 ${doneTodayScript}}
     ''${execpi 30 ${inboxScript}}
     ''${execpi 30 ${habitsScript}}
-    ''${execpi 1 ${pomoScript}}
 
     ''${voffset 6}''${color1}${hdr "${icoHeader glyph.calWeek} Calendar"}''${color}
     ''${font ${headerFontBold}}''${color1}Mo Tu We Th Fr Sa Su''${color}''${font ${cfg.font}}

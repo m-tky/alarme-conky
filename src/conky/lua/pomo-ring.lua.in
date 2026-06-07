@@ -58,11 +58,14 @@ function conky_draw_pomo_ring()
   local cr = cairo_create(surface)
   -- Logical width is what cairo's coordinate system uses; pixel scaling
   -- is applied by the surface's device_scale before paint.
+  -- Position: sits at the top-right of the panel, inside the slot the
+  -- Pomodoro text section reserves below the Alarme banner. Numbers
+  -- empirically tuned for the default minWidth (≈ 288px) + 12pt body.
   local panel_w = (conky_window and conky_window.width) or PANEL_W
-  local cx = panel_w - 36
-  local cy = 32
-  local radius = 18
-  local thickness = 4
+  local radius = 28
+  local thickness = 5
+  local cx = panel_w - radius - 14
+  local cy = 70
 
   -- Background ring — muted, faint enough to suggest "this is the
   -- track" without competing with the foreground arc.
@@ -95,7 +98,7 @@ function conky_draw_pomo_ring()
     cairo_set_source_rgba(cr, r, g, b, 1.0)
     cairo_select_font_face(cr, FONT_FAM,
       CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD)
-    cairo_set_font_size(cr, 10)
+    cairo_set_font_size(cr, 13)
     local text = pomo.remaining
     local extents = cairo_text_extents_t:create()
     tolua.takeownership(extents)
