@@ -432,15 +432,39 @@ end
 local CAL_CELL_H = 26
 local CAL_WK_H   = 18
 
-local function busy_n(busy, day)
+local function iso_date(y, m, d)
+  return string.format('%04d-%02d-%02d', y, m, d)
+end
+
+local function busy_n(busy, y, m, d)
   if not busy then return 0 end
-  return tonumber(busy[tostring(day)] or busy[day]) or 0
+  return tonumber(busy[iso_date(y, m, d)]) or 0
+end
+
+-- Normalise (year, month+offset) so month stays in 1..12.
+local function carry_month(y, m)
+  while m < 1  do m = m + 12; y = y - 1 end
+  while m > 12 do m = m - 12; y = y + 1 end
+  return y, m
 end
 
 local function draw_calendar(cr, x, y_top, w, cal)
-  local today = tonumber(cal.today) or 0
+  -- New schema:
+  --   cal.today  = ISO date string "YYYY-MM-DD"
+  --   cal.weeks  = [[ [day, month_offset], ... ], ...]  6-7 weeks
+  --   cal.busy   = { "YYYY-MM-DD": count, ... }
+  -- ``month_offset`` is -1 / 0 / +1 relative to cal.month, letting
+  -- prev/next-month spillover days render continuously instead of
+  -- as blank cells; the fetcher prepends/appends a buffer week so
+  -- today always has at least 1 week of context above and below.
+  local today_iso = cal.today or ''
+  local today_y = tonumber(today_iso:sub(1, 4))  or 0
+  local today_m = tonumber(today_iso:sub(6, 7))  or 0
+  local today_d = tonumber(today_iso:sub(9, 10)) or 0
+  local cur_y = tonumber(cal.year)  or today_y
+  local cur_m = tonumber(cal.month) or today_m
   local weeks = cal.weeks or {}
-  local busy  = cal.busy or {}
+  local busy  = cal.busy  or {}
   local cell_w = w / 7
 
   -- Weekday header row
@@ -454,16 +478,31 @@ local function draw_calendar(cr, x, y_top, w, cal)
   -- Day grid
   local grid_y = y_top + CAL_WK_H
   for row_i, week in ipairs(weeks) do
-    for col_i, day in ipairs(week) do
+    for col_i, cell in ipairs(week) do
+      -- Cell is the new [day, month_offset] tuple, but tolerate the
+      -- legacy plain-int form too in case a stale state.json is read
+      -- during an upgrade.
+      local day, off
+      if type(cell) == 'table' then
+        day = tonumber(cell[1]) or 0
+        off = tonumber(cell[2]) or 0
+      else
+        day = tonumber(cell) or 0
+        off = 0
+      end
       if day > 0 then
+        local cy_yr, cy_mo = carry_month(cur_y, cur_m + off)
+        local is_today = (cy_yr == today_y and cy_mo == today_m and day == today_d)
+        local is_adjacent = (off ~= 0)
+        local is_past = (cy_yr < today_y) or
+                        (cy_yr == today_y and cy_mo < today_m) or
+                        (cy_yr == today_y and cy_mo == today_m and day < today_d)
+        local n = busy_n(busy, cy_yr, cy_mo, day)
+
         local cx = x + (col_i - 0.5) * cell_w
         local cy = grid_y + (row_i - 0.5) * CAL_CELL_H
-        local is_today = (day == today)
-        local n = busy_n(busy, day)
-        local is_past = day < today
 
         if is_today then
-          -- Filled accent disc behind today's number
           rgba(cr, PALETTE.accent, 1.0)
           cairo_new_sub_path(cr)
           cairo_arc(cr, cx, cy, 11, 0, 2 * math.pi)
@@ -474,8 +513,12 @@ local function draw_calendar(cr, x, y_top, w, cal)
           rgba(cr, PALETTE.alert, 0.95)
         elseif n >= 1 then
           rgba(cr, PALETTE.highlight, 0.95)
+        elseif is_adjacent then
+          -- Days from prev/next month — visibly de-emphasised so the
+          -- current month still reads as primary.
+          rgba(cr, PALETTE.muted, 0.45)
         elseif is_past then
-          rgba(cr, PALETTE.muted, 0.40)
+          rgba(cr, PALETTE.muted, 0.55)
         else
           rgba(cr, PALETTE.fg, 0.85)
         end

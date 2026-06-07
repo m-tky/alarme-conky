@@ -199,7 +199,11 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
     # scheduled_date OR a deadline. Past days are left uncoloured even
     # if something landed there — markers answer "where's my next gap?",
     # not "where have I been?".
-    busy_counts: dict[int, int] = {}
+    # Busy markers keyed by ISO date so we can carry counts for days
+    # spilling into prev/next months when today sits at a row edge
+    # of the displayed grid. The legacy day-int dict was current-month-
+    # only.
+    busy_counts: dict[str, int] = {}
     today_dt = date.today()
     items: list[dict[str, Any]] = []
     # /tasks returns TaskListResponse{ data, next_cursor, has_more }.
@@ -258,7 +262,8 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
                 )
         # Grid busy markers consider *either* scheduled_date or deadline
         # so a task with only a deadline shows up next to days that have
-        # explicit timeline entries.
+        # explicit timeline entries. We count any future date here; the
+        # calendar widget filters to dates it's actually displaying.
         for raw_d in (scheduled, deadline_date):
             if not raw_d:
                 continue
@@ -266,28 +271,51 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
                 d = date.fromisoformat(raw_d)
             except ValueError:
                 continue
-            if (
-                d >= today_dt
-                and d.year == today_dt.year
-                and d.month == today_dt.month
-            ):
-                busy_counts[d.day] = busy_counts.get(d.day, 0) + 1
+            if d >= today_dt:
+                iso = d.isoformat()
+                busy_counts[iso] = busy_counts.get(iso, 0) + 1
     calendar_upcoming.sort(key=lambda c: c["when"])
     calendar_upcoming = calendar_upcoming[:5]
-    calendar_grid = _render_month_grid(today_dt, busy_counts)
-    calendar_highlights = [
-        f"→ {c['when']}  {c['title']}" for c in calendar_upcoming[:2]
-    ]
-    # Raw structured calendar data for the cairo widget. The conky Lua
-    # panel-widgets script needs the month layout as a 2D array, the
-    # today day-of-month, and the busy-count map — it then draws the
-    # circles itself instead of consuming pre-rendered text.
+    # Raw structured calendar data for the cairo widget.
+    #
+    # We use monthdatescalendar (returns date objects, including the
+    # spillover days from prev / next month) instead of the legacy
+    # monthdayscalendar (returns ints, 0 for spillover). That lets us:
+    #   - render adjacent-month days continuously (no blank cells)
+    #   - guarantee at least one week of context before AND after today
+    #     even when today lands in the first or last row of the month
+    #
+    # If today sits in row 0 we prepend the prior week; if today sits
+    # in the final row we append the next week. Either edge becomes a
+    # 6- or 7-week grid; mid-month is unchanged.
+    #
+    # Each cell is encoded as [day, month_offset]; month_offset is -1
+    # (prev), 0 (current), +1 (next) relative to today's month. Days
+    # outside the displayed month render muted on the panel.
     cal_obj = calendar_mod.Calendar(firstweekday=0)
+    month_weeks: list[list[date]] = [
+        list(w) for w in cal_obj.monthdatescalendar(today_dt.year, today_dt.month)
+    ]
+    today_row_idx = next(i for i, w in enumerate(month_weeks) if today_dt in w)
+    if today_row_idx == 0:
+        prev_week = [d - timedelta(days=7) for d in month_weeks[0]]
+        month_weeks.insert(0, prev_week)
+        today_row_idx = 1
+    if today_row_idx == len(month_weeks) - 1:
+        next_week = [d + timedelta(days=7) for d in month_weeks[-1]]
+        month_weeks.append(next_week)
+
+    def _month_offset(d: date) -> int:
+        return (d.year * 12 + d.month) - (today_dt.year * 12 + today_dt.month)
+
+    weeks_encoded = [
+        [[d.day, _month_offset(d)] for d in week] for week in month_weeks
+    ]
     calendar_struct = {
         "year": today_dt.year,
         "month": today_dt.month,
-        "today": today_dt.day,
-        "weeks": cal_obj.monthdayscalendar(today_dt.year, today_dt.month),
+        "today": today_dt.isoformat(),
+        "weeks": weeks_encoded,
         "busy": busy_counts,
     }
 
@@ -381,54 +409,9 @@ async def fetch_all(client: httpx.AsyncClient) -> dict[str, Any]:
         "pomodoro": pomodoro,
         "notes_recent": notes_recent,
         "calendar_upcoming": calendar_upcoming,
-        "calendar_grid": calendar_grid,
-        "calendar_highlights": calendar_highlights,
         "calendar_struct": calendar_struct,
     }
 
-
-def _render_month_grid(today_dt: date, busy_counts: dict[int, int]) -> str:
-    """Multi-line text grid for the month containing today.
-
-    Conky colour escapes are baked in:
-    - today: ``${color5}`` (ok / green) so the eye lands on it instantly
-    - 1-2 events on a day: ``${color3}`` (highlight / yellow)
-    - 3+ events on a day: ``${color4}`` (alert / red)
-    - empty days and past days: default foreground
-
-    All inter-cell spacing uses U+00A0 (non-breaking space) because
-    conky's text renderer collapses runs of ASCII spaces, which would
-    otherwise crush "10 11" into "10 11" instead of "10 11" and break
-    column alignment. Inside ``${color …}`` markup, ASCII spaces stay
-    intact (conky parses the tag, then renders only the contained text).
-    """
-    nbsp = " "
-    cal_obj = calendar_mod.Calendar(firstweekday=0)
-    weeks = cal_obj.monthdayscalendar(today_dt.year, today_dt.month)
-    # The weekday header ("Mo Tu …") is emitted by the conkyrc as a
-    # static bold line; we render only the date rows here so font
-    # changes in home.nix don't require restarting the fetcher.
-    lines: list[str] = []
-    for week in weeks:
-        cells: list[str] = []
-        for day in week:
-            if day == 0:
-                cells.append(nbsp * 2)
-                continue
-            # Two-char right-aligned cell; the padding space (when day
-            # is single-digit) must also be NBSP.
-            n = f"{day:>2d}".replace(" ", nbsp)
-            count = busy_counts.get(day, 0)
-            if day == today_dt.day:
-                cells.append(f"${{color5}}{n}${{color}}")
-            elif count >= 3:
-                cells.append(f"${{color4}}{n}${{color}}")
-            elif count >= 1:
-                cells.append(f"${{color3}}{n}${{color}}")
-            else:
-                cells.append(n)
-        lines.append(nbsp.join(cells))
-    return "\n".join(lines)
 
 
 # ── Daemon loop ───────────────────────────────────────────────────────────────
