@@ -35,13 +35,18 @@
           fetcher = pkgs.callPackage ./pkgs/fetcher.nix { inherit pyEnv; };
           widget-cli = pkgs.callPackage ./pkgs/widget-cli.nix { inherit pyEnv; };
           setup = pkgs.callPackage ./pkgs/setup.nix { };
+          # Upstream conky v1.24 with Wayland-capable Lua+cairo.
+          # nixpkgs ships 1.22.3 which lacks conky_surface(). We
+          # expose our build here so the home-manager module — and
+          # anyone else consuming the flake — uses the same binary.
+          conky = pkgs.callPackage ./pkgs/conky.nix { };
           default = self.packages.${system}.widget-cli;
         };
 
         devShells.default = pkgs.mkShell {
           packages = [
             pyEnv
-            pkgs.conky
+            self.packages.${system}.conky
             pkgs.fuzzel
             pkgs.jq
             pkgs.libnotify  # notify-send

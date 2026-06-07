@@ -374,7 +374,9 @@ in
 
   config = lib.mkIf cfg.enable {
     home.packages = [
-      pkgs.conky
+      # Upstream conky v1.24 built by the flake — gives us
+      # ``conky_surface()`` so Lua + cairo works under Wayland.
+      flakePkgs.conky
       pkgs.fuzzel
       pkgs.jq
       pkgs.libnotify
@@ -416,7 +418,7 @@ in
       };
       Service = {
         Type = "simple";
-        ExecStart = "${pkgs.conky}/bin/conky -c ${conkyConf}";
+        ExecStart = "${flakePkgs.conky}/bin/conky -c ${conkyConf}";
         Restart = "on-failure";
         RestartSec = 3;
       };
