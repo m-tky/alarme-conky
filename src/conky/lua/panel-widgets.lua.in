@@ -79,7 +79,14 @@ local function draw_text_centered(cr, x, y, s, size, weight)
   cairo_select_font_face(cr, FONT_FAM, 0, weight or 0)
   cairo_set_font_size(cr, size)
   local e = text_extents(cr, s)
-  cairo_move_to(cr, x - e.width / 2 - e.x_bearing, y - e.y_bearing / 2 - e.height / 2)
+  -- Glyph bounding box spans from (y_baseline + y_bearing) to
+  -- (y_baseline + y_bearing + height). Setting the centre of that
+  -- box at the target y yields:
+  --   y_baseline = y - y_bearing - height/2
+  -- The earlier draft halved y_bearing, which left the text floating
+  -- ~⅓ of its own height above the geometric centre of the ring.
+  cairo_move_to(cr, x - e.width / 2 - e.x_bearing,
+                    y - e.y_bearing - e.height / 2)
   cairo_show_text(cr, s)
 end
 
