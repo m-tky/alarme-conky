@@ -164,10 +164,11 @@ let
         minimum_width = ${toString cfg.minWidth},
         -- Wayland conky pins the layer-shell surface width at startup
         -- from maximum_width — omitting it produces a 0-width surface
-        -- the compositor silently drops. So we always emit it, defaulting
-        -- to minWidth + 60 when the user didn't set maxWidth explicitly.
+        -- the compositor silently drops. So we always emit it; default
+        -- equals minWidth (fixed width, no extra growth room) when the
+        -- user didn't set maxWidth explicitly.
         maximum_width = ${toString (
-          if cfg.maxWidth != null then cfg.maxWidth else cfg.minWidth + 60
+          if cfg.maxWidth != null then cfg.maxWidth else cfg.minWidth
         )},
         border_inner_margin = 12,
         border_outer_margin = 0,
@@ -268,14 +269,16 @@ in
 
     minWidth = lib.mkOption {
       type = lib.types.ints.positive;
-      # Derived from bodySize so the surface scales when the user
-      # bumps fonts — at 12pt mono, 50 chars × ~7px ≈ 360px; we add
-      # padding for icons and counter widget margins.
-      default = cfg.bodySize * 36;
-      defaultText = "bodySize * 36 (≈ 50 chars + padding)";
+      # Derived from bodySize: ≈ 40 chars at the current font size.
+      # Anything longer (task title up to 48 chars) ellipsizes — that
+      # trades tail-of-title visibility for a panel that doesn't dwarf
+      # the rest of the workspace. Override here if you actively want
+      # full titles to fit.
+      default = cfg.bodySize * 24;
+      defaultText = "bodySize * 24 (≈ 40 chars)";
       description = ''
         Lower bound on the panel width. Default scales with
-        ``bodySize`` so larger fonts don't clip task titles.
+        ``bodySize`` so larger fonts don't clip headers.
       '';
     };
 
@@ -285,11 +288,10 @@ in
       example = 420;
       description = ''
         Upper bound on the panel width. When ``null`` (default), the
-        emitted ``maximum_width`` is ``minWidth + 60`` — Wayland conky
+        emitted ``maximum_width`` equals ``minWidth`` — Wayland conky
         needs a concrete value because the layer-shell surface size
         is fixed at startup, not grown to fit content. Set explicitly
-        to widen further or to clamp tighter; long titles will
-        ellipsize at this width.
+        to widen further; long titles ellipsize at this width.
       '';
     };
 
