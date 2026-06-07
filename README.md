@@ -43,14 +43,9 @@ keybinds) lands declaratively.
 
 ## Requirements
 
-- A running Alarme backend (FastAPI, see [the task app
-  repo](https://github.com/m-tky/task)) reachable over HTTP — Tailscale
-  is the canonical transport, but any URL the fetcher can resolve works.
-- A Firebase project the backend authenticates against:
-  - Web API key (public — read off your Firebase project's web app
-    config).
-  - A service-account JSON for minting custom tokens. **Keep this file
-    out of git.** Drop it at `~/.config/wayland-conky/service-account.json`.
+- A running Alarme backend reachable over HTTP. Tailscale is the
+  canonical transport, but any URL the fetcher can resolve works.
+- An Alarme account (sign in via the Alarme app first).
 - A Wayland compositor with `wlr-layer-shell-v1`.
 - NixOS + home-manager are first-class; everything else needs you to
   port the home-manager module by hand.
@@ -75,9 +70,8 @@ Then import the module in your home config:
 
   programs.wayland-conky = {
     enable = true;
-    apiBaseUrl = "https://alarme.example.com";        # your backend
-    firebaseWebApiKey = "AIzaSy…";                    # your Firebase project
-    theme.variant = "nightfox";                       # or carbonfox, duskfox, …
+    apiBaseUrl = "https://alarme.example.com";  # your backend
+    theme.variant = "nightfox";                 # or carbonfox, duskfox, …
   };
 }
 ```
@@ -85,17 +79,18 @@ Then import the module in your home config:
 `home-manager switch`, then bootstrap the PAT:
 
 ```bash
-# Put your service-account JSON in place first.
-ln -s /path/to/firebase-adminsdk-*.json \
-      ~/.config/wayland-conky/service-account.json
-
-wayland-conky-setup --email you@example.com
+# 1. Open the Alarme app → Settings → API keys → "Create key".
+# 2. Copy the plaintext token (shown exactly once).
+# 3. Run setup and paste it.
+wayland-conky-setup
+# → Paste your PAT (input hidden): …
+# → wrote ~/.config/wayland-conky/token
 # → systemctl --user restart wayland-conky-fetcher.service
 ```
 
-The setup script signs in via the Firebase Admin SDK (custom token →
-ID token exchange), issues a PAT against `/auth/api-keys`, and writes
-the result to `~/.config/wayland-conky/token` (chmod 600).
+The token is written to `~/.config/wayland-conky/token` (chmod 600).
+Non-interactive use is supported via `--token` or
+`WAYLAND_CONKY_TOKEN` env var.
 
 ## Configuration
 
@@ -104,7 +99,6 @@ Every option lives under `programs.wayland-conky`:
 | Option | Default | Notes |
 |---|---|---|
 | `apiBaseUrl` | `http://localhost:8001` | Backend base URL, no trailing slash |
-| `firebaseWebApiKey` | `null` | Required — Firebase project Web API key |
 | `pollSeconds` | `30` | Background fetch cadence |
 | `output` | `""` | wl_output to pin to ("" = first available) |
 | `alignment` | `top_right` | conky alignment string |

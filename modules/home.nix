@@ -151,12 +151,10 @@ let
     ]];
   '';
 
-  # Configuration shared by fetcher, CLI, and setup script.
+  # Configuration shared by fetcher and CLI.
   appConfigToml = pkgs.writeText "wayland-conky-config.toml" ''
     api_base_url = "${cfg.apiBaseUrl}"
     poll_seconds = ${toString cfg.pollSeconds}
-    ${lib.optionalString (cfg.firebaseWebApiKey != null)
-      "firebase_web_api_key = \"${cfg.firebaseWebApiKey}\""}
   '';
 
 in
@@ -167,24 +165,11 @@ in
     apiBaseUrl = lib.mkOption {
       type = lib.types.str;
       default = "http://localhost:8001";
-      example = "http://orangepi3b:8002";
+      example = "https://alarme.example.com";
       description = ''
-        Base URL of the task backend (no trailing slash). Default is
+        Base URL of the Alarme backend (no trailing slash). Default is
         the local dev backend; point at your deployed instance for
         prod use.
-      '';
-    };
-
-    firebaseWebApiKey = lib.mkOption {
-      type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "AIzaSy…";
-      description = ''
-        Firebase Web API key for the project the task backend
-        authenticates against. Read from your Firebase project's web
-        app config — public by Firebase design, but each user must
-        supply their own. Written into config.toml so
-        ``wayland-conky-setup`` can mint PATs.
       '';
     };
 
